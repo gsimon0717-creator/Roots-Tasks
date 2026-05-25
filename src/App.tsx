@@ -234,6 +234,7 @@ export default function App() {
   const [filterPriority, setFilterPriority] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [showCompleted, setShowCompleted] = useState(true);
+  const [filterAssigneeId, setFilterAssigneeId] = useState<number | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -1127,6 +1128,20 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Assignee</label>
+              <select 
+                value={filterAssigneeId || ''}
+                onChange={(e) => setFilterAssigneeId(e.target.value ? Number(e.target.value) : null)}
+                className="bg-slate-50 border border-slate-200 rounded-2xl px-3 py-1.5 text-xs font-bold focus:outline-none focus:border-emerald-500 cursor-pointer transition-all"
+              >
+                <option value="">All Assignees</option>
+                {users.map(u => (
+                  <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
+                ))}
+              </select>
+            </div>
+
             <div className="relative">
               <Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
               <input 
@@ -1475,6 +1490,9 @@ export default function App() {
 
                           // Filter by Completed
                           if (!showCompleted && t.status === 'completed') return false;
+
+                          // Filter by Assignee
+                          if (filterAssigneeId !== null && t.assignee_id !== filterAssigneeId) return false;
 
                           return true;
                         })
@@ -1851,6 +1869,9 @@ export default function App() {
                         // Filter by Completed
                         if (!showCompleted && t.status === 'completed') return false;
 
+                        // Filter by Assignee
+                        if (filterAssigneeId !== null && t.assignee_id !== filterAssigneeId) return false;
+
                         const sid = t.section_assignments?.[projectId];
                         return section.id === null ? !sid : sid === section.id;
                       });
@@ -2006,6 +2027,26 @@ export default function App() {
                                                 {new Date(task.due_date).toLocaleDateString()}
                                               </div>
                                             )}
+                                            {task.assignee_id && (
+                                              <div className="flex items-center gap-1.5 ml-auto border border-slate-100 bg-slate-50/50 rounded-xl px-2 py-0.5 shrink-0 transition-all">
+                                                {(() => {
+                                                  const u = users.find(usr => usr.id === task.assignee_id);
+                                                  if (!u) return null;
+                                                  const fullName = `${u.first_name} ${u.last_name || ''}`.trim();
+                                                  return (
+                                                    <>
+                                                      <img 
+                                                        src={u.avatar_url} 
+                                                        alt={fullName} 
+                                                        className="w-4 h-4 rounded-full ring-1 ring-slate-200"
+                                                        referrerPolicy="no-referrer"
+                                                      />
+                                                      <span className="text-[10px] font-semibold text-slate-500">{fullName}</span>
+                                                    </>
+                                                  );
+                                                })()}
+                                              </div>
+                                            )}
                                           </div>
                                         </div>
 
@@ -2047,6 +2088,35 @@ export default function App() {
                                             exit={{ height: 0, opacity: 0 }}
                                             className="overflow-hidden border-t border-slate-100 pt-4 space-y-6"
                                           >
+                                            {/* Assignee */}
+                                            <div className="space-y-2">
+                                              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                                <UserIcon size={12} /> Assignee
+                                              </h4>
+                                              <div className="pl-4">
+                                                <div className="flex items-center gap-2 max-w-xs bg-slate-50 border border-slate-200 rounded-xl p-1.5 focus-within:border-emerald-500 transition-all">
+                                                  {task.assignee_id && (
+                                                    <img 
+                                                      src={users.find(u => u.id === task.assignee_id)?.avatar_url} 
+                                                      alt="Avatar"
+                                                      className="w-5 h-5 rounded-full ml-1 shrink-0"
+                                                      referrerPolicy="no-referrer"
+                                                    />
+                                                  )}
+                                                  <select 
+                                                    value={task.assignee_id || ''}
+                                                    onChange={(e) => assignTaskToUser(task.id, e.target.value ? Number(e.target.value) : null)}
+                                                    className="bg-transparent border-none focus:ring-0 text-xs font-bold text-slate-700 cursor-pointer flex-grow py-1 focus:outline-none"
+                                                  >
+                                                    <option value="">Unassigned</option>
+                                                    {users.map(u => (
+                                                      <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
+                                                    ))}
+                                                  </select>
+                                                </div>
+                                              </div>
+                                            </div>
+
                                             {/* Key Result */}
                                             <div className="space-y-2">
                                               <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">

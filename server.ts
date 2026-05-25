@@ -1,8 +1,9 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs";
+import { spawnSync } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -205,6 +206,67 @@ if (userCount.count === 0) {
 }
 
 async function startServer() {
+  // Idempotent auto-build check for frontend
+  const distIndexPath = path.join(__dirname, "dist", "index.html");
+  let rebuildNeeded = false;
+
+  if (!fs.existsSync(distIndexPath)) {
+    rebuildNeeded = true;
+  } else {
+    try {
+      const distStat = fs.statSync(distIndexPath);
+      const distMtime = distStat.mtime.getTime();
+
+      const srcDir = path.join(__dirname, "src");
+      let newestSrcMtime = 0;
+
+      function findNewestMtime(dir: string) {
+        if (!fs.existsSync(dir)) return;
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const resPath = path.resolve(dir, entry.name);
+          if (entry.isDirectory()) {
+            findNewestMtime(resPath);
+          } else if (entry.isFile()) {
+            const ext = path.extname(entry.name).toLowerCase();
+            if (ext === ".tsx" || ext === ".ts" || ext === ".css") {
+              const fileStat = fs.statSync(resPath);
+              if (fileStat.mtime.getTime() > newestSrcMtime) {
+                newestSrcMtime = fileStat.mtime.getTime();
+              }
+            }
+          }
+        }
+      }
+
+      findNewestMtime(srcDir);
+
+      if (newestSrcMtime > distMtime) {
+        rebuildNeeded = true;
+      }
+    } catch (e: any) {
+      console.error("[startup] Error analyzing source files mtime, forcing rebuild:", e.message || e);
+      rebuildNeeded = true;
+    }
+  }
+
+  if (rebuildNeeded) {
+    console.log("[startup] Source newer than dist/. Running vite build...");
+    const buildResult = spawnSync("npm", ["run", "build"], { 
+      stdio: "inherit", 
+      shell: true,
+      cwd: __dirname
+    });
+
+    if (buildResult.status !== 0) {
+      console.error("[startup] npm run build failed with exit code:", buildResult.status);
+      process.exit(1);
+    }
+    console.log("[startup] vite build complete. Serving fresh frontend from dist/.");
+  } else {
+    console.log("[startup] dist/ is current. Skipping rebuild.");
+  }
+
   const app = express();
   const PORT = 3000;
 
@@ -751,19 +813,11 @@ async function startServer() {
   // Mount the API router
   app.use("/api", apiRouter);
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
-    });
-  }
+  // Serve built assets from the dist directory
+  app.use(express.static(path.join(__dirname, "dist")));
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(__dirname, "dist", "index.html"));
+  });
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
