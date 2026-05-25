@@ -10,6 +10,37 @@ const __dirname = path.dirname(__filename);
 const db = new Database("tasks.db");
 db.pragma('foreign_keys = ON');
 
+// Auto-migrate users table schema if upgrading from old version
+try {
+  const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").get();
+  if (tableExists) {
+    const columns = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+    const hasFirstName = columns.some(c => c.name === 'first_name');
+    if (!hasFirstName) {
+      console.log("Migration: 'first_name' column not found in 'users' table. Starting schema migration...");
+      
+      db.prepare("ALTER TABLE users ADD COLUMN first_name TEXT").run();
+      db.prepare("ALTER TABLE users ADD COLUMN last_name TEXT").run();
+      db.prepare("ALTER TABLE users ADD COLUMN phone TEXT").run();
+      db.prepare("ALTER TABLE users ADD COLUMN is_di INTEGER DEFAULT 0").run();
+      db.prepare("ALTER TABLE users ADD COLUMN user_type TEXT DEFAULT 'human'").run();
+      
+      const hasName = columns.some(c => c.name === 'name');
+      if (hasName) {
+        const updateResult = db.prepare("UPDATE users SET first_name = name WHERE first_name IS NULL AND name IS NOT NULL").run();
+        console.log(`Migration: Updated first_name for ${updateResult.changes} user(s) using their 'name' values.`);
+      } else {
+        console.log("Migration: No 'name' column found to migrate display names from.");
+      }
+      
+      const userCountObj = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
+      console.log(`Migration: Users table schema successfully updated. Migrated ${userCountObj?.count || 0} existing users in total.`);
+    }
+  }
+} catch (error: any) {
+  console.error("Migration failed:", error.message || error);
+}
+
 // Initialize database
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
