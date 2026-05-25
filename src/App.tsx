@@ -13,6 +13,8 @@ import {
   Users,
   FolderKanban,
   LayoutDashboard,
+  LayoutGrid,
+  List,
   Settings,
   MoreVertical,
   PlusCircle,
@@ -27,7 +29,9 @@ import {
   Maximize2,
   AlertTriangle,
   Building,
-  User as UserIcon
+  User as UserIcon,
+  Mail,
+  Phone
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -108,9 +112,13 @@ interface Task {
 
 interface User {
   id: number;
-  name: string;
+  first_name: string;
+  last_name?: string;
   email: string;
-  avatar_url: string;
+  phone?: string;
+  avatar_url?: string;
+  is_di: boolean;
+  user_type: 'Human Super Admin' | 'DI Super Admin' | 'Human Admin' | 'DI Admin' | 'Human User' | 'DI User';
 }
 
 const SECTION_COLORS = [
@@ -132,7 +140,7 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
-  const [allSections, setAllSections] = useState<Record<number, Section[]>>({});
+  const [allSections, setAllSections] = useState<Section[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   
@@ -159,6 +167,7 @@ export default function App() {
   const [isAddingProject, setIsAddingProject] = useState(false);
   const [showAllTasksAddForm, setShowAllTasksAddForm] = useState(false);
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
+  const [projectListView, setProjectListView] = useState(false);
   
   const [newSectionName, setNewSectionName] = useState('');
   const [newSectionColor, setNewSectionColor] = useState('slate');
@@ -187,7 +196,25 @@ export default function App() {
   const [editingSubtaskId, setEditingSubtaskId] = useState<number | null>(null);
   const [editingSubtaskTitle, setEditingSubtaskTitle] = useState('');
 
-  const [currentView, setCurrentView] = useState<'project' | 'all-tasks' | 'about'>('project');
+  const [currentView, setCurrentView] = useState<'project' | 'all-tasks' | 'about' | 'users'>('project');
+  
+  // User Creation States
+  const [isAddingUser, setIsAddingUser] = useState(false);
+  const [newUserFirstName, setNewUserFirstName] = useState('');
+  const [newUserLastName, setNewUserLastName] = useState('');
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserPhone, setNewUserPhone] = useState('');
+  const [newUserIsDI, setNewUserIsDI] = useState(false);
+  const [newUserType, setNewUserType] = useState<User['user_type']>('Human User');
+
+  // User Editing States
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [editingUserFirstName, setEditingUserFirstName] = useState('');
+  const [editingUserLastName, setEditingUserLastName] = useState('');
+  const [editingUserEmail, setEditingUserEmail] = useState('');
+  const [editingUserPhone, setEditingUserPhone] = useState('');
+  const [editingUserIsDI, setEditingUserIsDI] = useState(false);
+  const [editingUserType, setEditingUserType] = useState<User['user_type']>('Human User');
   const [sortField, setSortField] = useState<string>('due_date');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
 
@@ -232,17 +259,10 @@ export default function App() {
       setProjects(projectsData);
       setTasks(tasksData);
       setUsers(usersData);
-
-      // Group sections by project_id
-      const sectionsMap = allSectionsData.reduce((acc: Record<number, Section[]>, s: Section) => {
-        if (!acc[s.project_id]) acc[s.project_id] = [];
-        acc[s.project_id].push(s);
-        return acc;
-      }, {});
-      setAllSections(sectionsMap);
+      setAllSections(allSectionsData);
 
       if (selectedProject) {
-        setSections(sectionsMap[selectedProject.id] || []);
+        setSections(allSectionsData.filter((s: Section) => Number(s.project_id) === Number(selectedProject.id)));
       }
     } catch (e) {
       console.error('Failed to fetch data', e);
@@ -256,6 +276,90 @@ export default function App() {
   }, [fetchData]);
 
   // Organization Actions
+  const addUser = async () => {
+    if (!newUserFirstName || !newUserEmail || !newUserType) return;
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          first_name: newUserFirstName,
+          last_name: newUserLastName,
+          email: newUserEmail,
+          phone: newUserPhone,
+          is_di: newUserIsDI,
+          user_type: newUserType
+        }),
+      });
+      if (res.ok) {
+        setIsAddingUser(false);
+        setNewUserFirstName('');
+        setNewUserLastName('');
+        setNewUserEmail('');
+        setNewUserPhone('');
+        setNewUserIsDI(false);
+        setNewUserType('Human User');
+        fetchData();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Failed to create user');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const editUser = async () => {
+    if (!editingUser) return;
+    if (!editingUserFirstName || !editingUserEmail || !editingUserType) return;
+    try {
+      const res = await fetch(`/api/users/${editingUser.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          first_name: editingUserFirstName,
+          last_name: editingUserIsDI ? '' : editingUserLastName,
+          email: editingUserEmail,
+          phone: editingUserPhone,
+          is_di: editingUserIsDI,
+          user_type: editingUserType
+        }),
+      });
+      if (res.ok) {
+        setEditingUser(null);
+        setEditingUserFirstName('');
+        setEditingUserLastName('');
+        setEditingUserEmail('');
+        setEditingUserPhone('');
+        setEditingUserIsDI(false);
+        setEditingUserType('Human User');
+        fetchData();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Failed to update user');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const deleteUser = async (userId: number) => {
+    if (!confirm('Are you sure you want to delete this user? All their task assignments will be cleared.')) return;
+    try {
+      const res = await fetch(`/api/users/${userId}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        fetchData();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Failed to delete user');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const addOrganization = async () => {
     if (!newOrgName.trim()) return;
     try {
@@ -442,6 +546,9 @@ export default function App() {
   };
 
   const updateTaskStatus = async (id: number, status: 'pending' | 'completed') => {
+    // Optimistic Update
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, status } : t));
+    
     try {
       console.log(`Updating task ${id} to ${status}`);
       const res = await fetch(`/api/tasks/${id}`, {
@@ -452,23 +559,43 @@ export default function App() {
       if (!res.ok) {
         const err = await res.json();
         console.error('Failed to update task status:', err);
+        fetchData(); // Rollback on error
         return;
       }
       console.log(`Task ${id} updated successfully`);
-      fetchData();
-    } catch (e) { console.error('Error updating task status:', e); }
+      // We don't strictly need a full fetchData() here if we trust our optimistic update 
+      // and the server confirmed success. But let's do a light sync if needed.
+    } catch (e) { 
+      console.error('Error updating task status:', e);
+      fetchData(); // Rollback on error
+    }
   };
 
   const updateTaskDetails = async (id: number, details: Partial<Task>) => {
+    // Optimistic Update
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, ...details } : t));
+
     try {
-      await fetch(`/api/tasks/${id}`, {
+      const res = await fetch(`/api/tasks/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(details),
       });
+      
+      if (!res.ok) {
+        fetchData(); // Rollback
+        return;
+      }
+
       setEditingTaskId(null);
-      fetchData();
-    } catch (e) { console.error(e); }
+      // If we are changing due_date, we might NOT want to call fetchData 
+      // immediately if it causes a heavy re-render that jumps the scroll.
+      // But we should eventually sync. 
+      // Let's only fetchData if it's NOT just a minor detail update OR use a debounced sync.
+    } catch (e) { 
+      console.error(e); 
+      fetchData(); // Rollback
+    }
   };
 
   const assignTaskToOrganization = async (taskId: number, orgId: number) => {
@@ -559,14 +686,30 @@ export default function App() {
 
   const toggleSubtask = async (subtask: Subtask) => {
     const newStatus = subtask.status === 'completed' ? 'pending' : 'completed';
+    // Optimistic Update
+    setTasks(prev => prev.map(t => {
+      if (t.id === subtask.task_id) {
+        return {
+          ...t,
+          subtasks: t.subtasks.map(st => st.id === subtask.id ? { ...st, status: newStatus } : st)
+        };
+      }
+      return t;
+    }));
+
     try {
-      await fetch(`/api/subtasks/${subtask.id}`, {
+      const res = await fetch(`/api/subtasks/${subtask.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus }),
       });
-      fetchData();
-    } catch (e) { console.error(e); }
+      if (!res.ok) {
+        fetchData(); // Rollback
+      }
+    } catch (e) { 
+      console.error(e); 
+      fetchData(); // Rollback
+    }
   };
 
   const updateSubtask = async (id: number, title: string) => {
@@ -660,15 +803,16 @@ export default function App() {
     if (!assigneeId) return null;
     const user = users.find(u => u.id === assigneeId);
     if (!user) return null;
+    const fullName = `${user.first_name} ${user.last_name || ''}`.trim();
     return (
       <div className="flex items-center gap-2">
         <img 
           src={user.avatar_url} 
-          alt={user.name} 
+          alt={fullName} 
           className="w-5 h-5 rounded-full ring-1 ring-slate-200"
           referrerPolicy="no-referrer"
         />
-        <span className="text-xs text-slate-600">{user.name}</span>
+        <span className="text-xs text-slate-600">{fullName}</span>
       </div>
     );
   };
@@ -714,6 +858,19 @@ export default function App() {
           >
             <Info size={18} />
             <span className="text-sm font-bold">About</span>
+          </button>
+
+          <button 
+            onClick={() => {
+              setCurrentView('users');
+              setSelectedOrganization(null);
+              setSelectedTeam(null);
+              setSelectedProject(null);
+            }}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all ${currentView === 'users' ? 'bg-emerald-600 text-white shadow-md shadow-emerald-100' : 'text-slate-600 hover:bg-slate-50'}`}
+          >
+            <Users size={18} />
+            <span className="text-sm font-bold">Users</span>
           </button>
         </div>
 
@@ -1159,7 +1316,7 @@ export default function App() {
                       >
                         <option value="">Unassigned</option>
                         {users.map(u => (
-                          <option key={u.id} value={u.id}>{u.name}</option>
+                          <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
                         ))}
                       </select>
                     </div>
@@ -1221,7 +1378,7 @@ export default function App() {
                       >
                         <option value="">Unassigned</option>
                         {users.map(u => (
-                          <option key={u.id} value={u.id}>{u.name}</option>
+                          <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
                         ))}
                       </select>
                     </div>
@@ -1276,149 +1433,160 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {tasks
-                      .filter(t => {
-                        // Filter by Organization if selected
-                        if (selectedOrganization) {
-                          // Direct assignment takes precedence
-                          if (t.organization_id && t.organization_id !== selectedOrganization.id) return false;
+                    <AnimatePresence mode="popLayout" initial={false}>
+                      {tasks
+                        .filter(t => {
+                          // Filter by Organization if selected
+                          if (selectedOrganization) {
+                            // Direct assignment takes precedence
+                            if (t.organization_id && t.organization_id !== selectedOrganization.id) return false;
 
-                          const taskInOrg = projects.some(p => {
-                            if (!t.project_ids.includes(p.id)) return false;
-                            const team = teams.find(team => team.id === p.team_id);
-                            return team?.organization_id === selectedOrganization.id;
-                          });
+                            const taskInOrg = projects.some(p => {
+                              if (!t.project_ids.includes(p.id)) return false;
+                              const team = teams.find(team => team.id === p.team_id);
+                              return team?.organization_id === selectedOrganization.id;
+                            });
+                            
+                            // If assigned to projects but none are in this organization, hide it.
+                            // Only allow if it's explicitly assigned to THIS org or has no projects at all (and no conflicting explicit org).
+                            if (t.project_ids.length > 0 && !taskInOrg) return false;
+                            if (t.project_ids.length === 0 && t.organization_id && t.organization_id !== selectedOrganization.id) return false;
+                          }
+
+                          // Filter by Team if selected
+                          if (selectedTeam) {
+                            const taskInTeam = projects.some(p => t.project_ids.includes(p.id) && p.team_id === selectedTeam.id);
+                            if (!taskInTeam) return false;
+                          }
                           
-                          // If assigned to projects but none are in this organization, hide it.
-                          // Only allow if it's explicitly assigned to THIS org or has no projects at all (and no conflicting explicit org).
-                          if (t.project_ids.length > 0 && !taskInOrg) return false;
-                          if (t.project_ids.length === 0 && t.organization_id && t.organization_id !== selectedOrganization.id) return false;
-                        }
+                          // Filter by Search Query
+                          if (searchQuery && !t.title.toLowerCase().includes(searchQuery.toLowerCase()) && !t.description?.toLowerCase().includes(searchQuery.toLowerCase())) {
+                            return false;
+                          }
 
-                        // Filter by Team if selected
-                        if (selectedTeam) {
-                          const taskInTeam = projects.some(p => t.project_ids.includes(p.id) && p.team_id === selectedTeam.id);
-                          if (!taskInTeam) return false;
-                        }
-                        
-                        // Filter by Search Query
-                        if (searchQuery && !t.title.toLowerCase().includes(searchQuery.toLowerCase()) && !t.description?.toLowerCase().includes(searchQuery.toLowerCase())) {
-                          return false;
-                        }
+                          // Filter by Priority
+                          if (filterPriority !== 'all' && t.priority !== filterPriority) return false;
 
-                        // Filter by Priority
-                        if (filterPriority !== 'all' && t.priority !== filterPriority) return false;
+                          // Filter by Status
+                          if (filterStatus !== 'all' && t.status !== filterStatus) return false;
 
-                        // Filter by Status
-                        if (filterStatus !== 'all' && t.status !== filterStatus) return false;
+                          // Filter by Orphaned
+                          if (filterOrphaned && t.project_ids.length > 0) return false;
 
-                        // Filter by Orphaned
-                        if (filterOrphaned && t.project_ids.length > 0) return false;
+                          // Filter by Completed
+                          if (!showCompleted && t.status === 'completed') return false;
 
-                        // Filter by Completed
-                        if (!showCompleted && t.status === 'completed') return false;
+                          return true;
+                        })
+                        .sort((a, b) => {
+                          const priorityOrder = { urgent: 4, high: 3, moderate: 2, low: 1 };
+                          let valA: any, valB: any;
+                          
+                          switch (sortField) {
+                            case 'title':
+                              valA = a.title.toLowerCase();
+                              valB = b.title.toLowerCase();
+                              break;
+                            case 'due_date':
+                              valA = a.due_date || '9999-99-99';
+                              valB = b.due_date || '9999-99-99';
+                              break;
+                            case 'priority':
+                              valA = priorityOrder[a.priority];
+                              valB = priorityOrder[b.priority];
+                              break;
+                            case 'status':
+                              valA = a.status;
+                              valB = b.status;
+                              break;
+                            case 'key_result':
+                              valA = (a.key_result || '').toLowerCase();
+                              valB = (b.key_result || '').toLowerCase();
+                              break;
+                            case 'project':
+                              const pA = projects.find(p => a.project_ids.includes(p.id))?.name || '';
+                              const pB = projects.find(p => b.project_ids.includes(p.id))?.name || '';
+                              valA = pA.toLowerCase();
+                              valB = pB.toLowerCase();
+                              break;
+                            case 'team':
+                              const projA = projects.find(p => a.project_ids.includes(p.id));
+                              const tA = teams.find(t => t.id === projA?.team_id)?.name || '';
+                              const projB = projects.find(p => b.project_ids.includes(p.id));
+                              const tB = teams.find(t => t.id === projB?.team_id)?.name || '';
+                              valA = tA.toLowerCase();
+                              valB = tB.toLowerCase();
+                              break;
+                            case 'organization':
+                              const paA = projects.find(p => a.project_ids.includes(p.id));
+                              const teA = teams.find(t => t.id === paA?.team_id);
+                              const oA = organizations.find(o => o.id === teA?.organization_id)?.name || '';
+                              const paB = projects.find(p => b.project_ids.includes(p.id));
+                              const teB = teams.find(t => t.id === paB?.team_id);
+                              const oB = organizations.find(o => o.id === teB?.organization_id)?.name || '';
+                              valA = oA.toLowerCase();
+                              valB = oB.toLowerCase();
+                              break;
+                            default:
+                              valA = a.id;
+                              valB = b.id;
+                          }
 
-                        return true;
-                      })
-                      .sort((a, b) => {
-                      const priorityOrder = { urgent: 4, high: 3, moderate: 2, low: 1 };
-                      let valA: any, valB: any;
-                      
-                      switch (sortField) {
-                        case 'title':
-                          valA = a.title.toLowerCase();
-                          valB = b.title.toLowerCase();
-                          break;
-                        case 'due_date':
-                          valA = a.due_date || '9999-99-99';
-                          valB = b.due_date || '9999-99-99';
-                          break;
-                        case 'priority':
-                          valA = priorityOrder[a.priority];
-                          valB = priorityOrder[b.priority];
-                          break;
-                        case 'status':
-                          valA = a.status;
-                          valB = b.status;
-                          break;
-                        case 'key_result':
-                          valA = (a.key_result || '').toLowerCase();
-                          valB = (b.key_result || '').toLowerCase();
-                          break;
-                        case 'project':
-                          const pA = projects.find(p => a.project_ids.includes(p.id))?.name || '';
-                          const pB = projects.find(p => b.project_ids.includes(p.id))?.name || '';
-                          valA = pA.toLowerCase();
-                          valB = pB.toLowerCase();
-                          break;
-                        case 'team':
-                          const projA = projects.find(p => a.project_ids.includes(p.id));
-                          const tA = teams.find(t => t.id === projA?.team_id)?.name || '';
-                          const projB = projects.find(p => b.project_ids.includes(p.id));
-                          const tB = teams.find(t => t.id === projB?.team_id)?.name || '';
-                          valA = tA.toLowerCase();
-                          valB = tB.toLowerCase();
-                          break;
-                        case 'organization':
-                          const paA = projects.find(p => a.project_ids.includes(p.id));
-                          const teA = teams.find(t => t.id === paA?.team_id);
-                          const oA = organizations.find(o => o.id === teA?.organization_id)?.name || '';
-                          const paB = projects.find(p => b.project_ids.includes(p.id));
-                          const teB = teams.find(t => t.id === paB?.team_id);
-                          const oB = organizations.find(o => o.id === teB?.organization_id)?.name || '';
-                          valA = oA.toLowerCase();
-                          valB = oB.toLowerCase();
-                          break;
-                        default:
-                          valA = a.id;
-                          valB = b.id;
-                      }
-
-                      if (valA < valB) return sortDirection === 'asc' ? -1 : 1;
-                      if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
-                      return 0;
-                    }).map((task) => {
-                      const project = projects.find(p => task.project_ids.includes(p.id));
-                      const team = teams.find(t => t.id === project?.team_id);
-                      
-                      return (
-                        <tr key={task.id} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors group">
-                          <td className="px-6 py-4">
-                            <button 
-                              onClick={() => updateTaskStatus(task.id, task.status === 'completed' ? 'pending' : 'completed')}
-                              className={`transition-colors ${task.status === 'completed' ? 'text-emerald-500' : 'text-slate-300 hover:text-emerald-500'}`}
+                          if (valA < valB) return sortDirection === 'asc' ? -1 : 1;
+                          if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
+                          return 0;
+                        }).map((task) => {
+                          const project = projects.find(p => task.project_ids.includes(p.id));
+                          const team = teams.find(t => t.id === project?.team_id);
+                          
+                          return (
+                            <motion.tr 
+                              layout
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              exit={{ opacity: 0 }}
+                              key={task.id} 
+                              className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors group"
                             >
-                              {task.status === 'completed' ? <CheckCircle2 size={20} /> : <Circle size={20} />}
-                            </button>
-                          </td>
-                          <td className="px-6 py-4">
-                            <button 
-                              onClick={() => setViewingTaskId(task.id)}
-                              className={`text-sm font-bold text-left hover:text-emerald-600 transition-colors ${task.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-800'}`}
-                            >
-                              {task.title}
-                            </button>
-                          </td>
+                              <td className="px-6 py-4">
+                                <button 
+                                  onClick={() => updateTaskStatus(task.id, task.status === 'completed' ? 'pending' : 'completed')}
+                                  className={`transition-colors ${task.status === 'completed' ? 'text-emerald-500' : 'text-slate-300 hover:text-emerald-500'}`}
+                                >
+                                  {task.status === 'completed' ? <CheckCircle2 size={20} /> : <Circle size={20} />}
+                                </button>
+                              </td>
+                              <td className="px-6 py-4">
+                                <button 
+                                  onClick={() => setViewingTaskId(task.id)}
+                                  className={`text-sm font-bold text-left hover:text-emerald-600 transition-colors ${task.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-800'}`}
+                                >
+                                  {task.title}
+                                </button>
+                              </td>
                           <td className="px-6 py-4">
                             <div className="flex items-center gap-2">
                               {task.assignee_id && (
                                 <img 
                                   src={users.find(u => u.id === task.assignee_id)?.avatar_url} 
-                                  alt="" 
+                                  alt={(() => {
+                                    const u = users.find(usr => usr.id === task.assignee_id);
+                                    return u ? `${u.first_name} ${u.last_name || ''}`.trim() : '';
+                                  })()}
                                   className="w-5 h-5 rounded-full ring-1 ring-slate-100"
                                   referrerPolicy="no-referrer"
                                 />
                               )}
-                              <select
-                                value={task.assignee_id || ''}
-                                onChange={(e) => assignTaskToUser(task.id, e.target.value ? Number(e.target.value) : null)}
-                                className="bg-transparent border-none focus:ring-0 text-xs font-medium text-slate-600 cursor-pointer p-0"
-                              >
-                                <option value="">Unassigned</option>
-                                {users.map(u => (
-                                  <option key={u.id} value={u.id}>{u.name}</option>
-                                ))}
-                              </select>
+                                <select
+                                  value={task.assignee_id || ''}
+                                  onChange={(e) => assignTaskToUser(task.id, e.target.value ? Number(e.target.value) : null)}
+                                  className="bg-transparent border-none focus:ring-0 text-xs font-medium text-slate-600 cursor-pointer p-0"
+                                >
+                                  <option value="">Unassigned</option>
+                                  {users.map(u => (
+                                    <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
+                                  ))}
+                                </select>
                             </div>
                           </td>
                           <td className="px-6 py-4">
@@ -1521,9 +1689,10 @@ export default function App() {
                               <Maximize2 size={16} />
                             </button>
                           </td>
-                        </tr>
-                      );
-                    })}
+                            </motion.tr>
+                          );
+                        })}
+                    </AnimatePresence>
                   </tbody>
                 </table>
               </div>
@@ -1569,7 +1738,7 @@ export default function App() {
                     >
                       <option value="">Unassigned</option>
                       {users.map(u => (
-                        <option key={u.id} value={u.id}>{u.name}</option>
+                        <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
                       ))}
                     </select>
                   </div>
@@ -1669,7 +1838,7 @@ export default function App() {
                   <div className="py-20 text-center text-slate-400">Loading tasks...</div>
                 ) : (
                   <>
-                    {[...(allSections[selectedProject.id] || []), { id: null, name: 'Uncategorized', color: 'slate' }].map((section: any) => {
+                    {[...allSections.filter(s => Number(s.project_id) === Number(selectedProject.id)), { id: null, name: 'Uncategorized', color: 'slate' }].map((section: any) => {
                       const sectionTasks = tasks.filter(t => {
                         const projectId = Number(selectedProject.id);
                         if (!t.project_ids.map(Number).includes(projectId)) return false;
@@ -1903,7 +2072,7 @@ export default function App() {
                                                 {task.project_ids.map(pid => {
                                                   const project = projects.find(p => p.id === pid);
                                                   if (!project) return null;
-                                                  const projectSections = allSections[pid] || [];
+                                                  const projectSections = allSections.filter(s => Number(s.project_id) === Number(pid));
                                                   const currentSectionId = task.section_assignments?.[pid];
                                                   
                                                   return (
@@ -2248,61 +2417,268 @@ export default function App() {
                   <h2 className="text-3xl font-black tracking-tight text-slate-900">{selectedTeam.name} Projects</h2>
                   <p className="text-slate-500 font-medium">Select a project to view its tasks and sections</p>
                 </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center bg-white border border-slate-200 rounded-2xl p-1 shadow-sm">
+                    <button 
+                      onClick={() => setProjectListView(false)}
+                      className={`p-2 rounded-xl transition-all ${!projectListView ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400 hover:text-emerald-600'}`}
+                      title="Grid View"
+                    >
+                      <LayoutGrid size={20} />
+                    </button>
+                    <button 
+                      onClick={() => setProjectListView(true)}
+                      className={`p-2 rounded-xl transition-all ${projectListView ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400 hover:text-emerald-600'}`}
+                      title="List View"
+                    >
+                      <List size={20} />
+                    </button>
+                  </div>
+                  <button 
+                    onClick={() => setIsAddingProject(true)}
+                    className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all hover:scale-105 active:scale-95"
+                  >
+                    <Plus size={20} />
+                    New Project
+                  </button>
+                </div>
+              </div>
+
+              {!projectListView ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {projects.filter(p => p.team_id === selectedTeam.id).map(project => (
+                    <button
+                      key={project.id}
+                      onClick={() => setSelectedProject(project)}
+                      className="group bg-white border border-slate-200 rounded-[32px] p-8 text-left hover:border-emerald-500 hover:shadow-xl hover:shadow-emerald-100 transition-all relative overflow-hidden"
+                    >
+                      <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-50 rounded-full -mr-16 -mt-16 group-hover:bg-emerald-100 transition-colors" />
+                      <div className="relative z-10">
+                        <div className="w-12 h-12 bg-slate-50 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-emerald-600 group-hover:text-white transition-all">
+                          <FolderKanban size={24} />
+                        </div>
+                        <h3 className="text-xl font-black text-slate-900 mb-2 group-hover:text-emerald-700 transition-colors">{project.name}</h3>
+                        <p className="text-sm text-slate-500 font-medium line-clamp-2 mb-6">{project.description || 'No description provided.'}</p>
+                        
+                        <div className="flex items-center justify-between pt-6 border-t border-slate-100">
+                          <div className="flex items-center gap-2">
+                            <div className="flex -space-x-2">
+                              {[1, 2, 3].map(i => (
+                                <div key={i} className="w-6 h-6 rounded-full bg-slate-200 border-2 border-white" />
+                              ))}
+                            </div>
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Team</span>
+                          </div>
+                          <ChevronRight size={16} className="text-slate-300 group-hover:text-emerald-600 group-hover:translate-x-1 transition-all" />
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                  
+                  {projects.filter(p => p.team_id === selectedTeam.id).length === 0 && (
+                    <div className="col-span-full py-20 text-center bg-slate-50 rounded-[40px] border-2 border-dashed border-slate-200">
+                      <div className="w-20 h-20 bg-white rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-sm">
+                        <FolderKanban size={40} className="text-slate-300" />
+                      </div>
+                      <h3 className="text-xl font-bold text-slate-800 mb-2">No projects yet</h3>
+                      <p className="text-slate-500 max-w-xs mx-auto mb-8">Get started by creating your first project for this team.</p>
+                      <button 
+                        onClick={() => setIsAddingProject(true)}
+                        className="inline-flex items-center gap-2 px-6 py-3 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold hover:border-emerald-500 hover:text-emerald-600 transition-all"
+                      >
+                        <Plus size={20} />
+                        Create Project
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {projects.filter(p => p.team_id === selectedTeam.id).map(project => {
+                    const isExpanded = expandedNodes[`project-list-${project.id}`];
+                    const projectTasks = tasks.filter(t => t.project_ids.includes(project.id));
+                    
+                    return (
+                      <div key={project.id} className="bg-white border border-slate-200 rounded-[32px] overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+                        <div 
+                          onClick={() => toggleNode(`project-list-${project.id}`)}
+                          className="p-6 flex items-center justify-between cursor-pointer group"
+                        >
+                          <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 bg-slate-50 rounded-2xl flex items-center justify-center group-hover:bg-emerald-600 group-hover:text-white transition-all">
+                              <FolderKanban size={20} />
+                            </div>
+                            <div>
+                              <h3 className="text-lg font-black text-slate-900">{project.name}</h3>
+                              <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">{projectTasks.length} Tasks</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedProject(project);
+                              }}
+                              className="text-xs font-bold text-emerald-600 hover:underline"
+                            >
+                              Go to Project
+                            </button>
+                            <ChevronRight 
+                              size={20} 
+                              className={`text-slate-300 transition-transform duration-300 ${isExpanded ? 'rotate-90' : ''}`} 
+                            />
+                          </div>
+                        </div>
+                        
+                        {isExpanded && (
+                          <div className="px-6 pb-6 pt-2 border-t border-slate-50 bg-slate-50/30">
+                            {projectTasks.length > 0 ? (
+                              <div className="space-y-2">
+                                {projectTasks.map(task => (
+                                  <div 
+                                    key={task.id} 
+                                    onClick={() => setViewingTaskId(task.id)}
+                                    className="flex items-center justify-between p-4 bg-white border border-slate-100 rounded-2xl hover:border-emerald-200 transition-all cursor-pointer group/task shadow-sm"
+                                  >
+                                    <div className="flex items-center gap-4">
+                                      <button 
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          updateTaskStatus(task.id, task.status === 'completed' ? 'pending' : 'completed');
+                                        }}
+                                        className={`transition-colors ${task.status === 'completed' ? 'text-emerald-500' : 'text-slate-300 hover:text-emerald-500'}`}
+                                      >
+                                        {task.status === 'completed' ? <CheckCircle2 size={18} /> : <Circle size={18} />}
+                                      </button>
+                                      <span className={`text-sm font-medium ${task.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-700'}`}>
+                                        {task.title}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                      <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wider ${getPriorityColor(task.priority)}`}>
+                                        {task.priority}
+                                      </span>
+                                      {task.assignee_id && (
+                                        <img 
+                                          src={users.find(u => u.id === task.assignee_id)?.avatar_url} 
+                                          alt={(() => {
+                                            const u = users.find(usr => usr.id === task.assignee_id);
+                                            return u ? `${u.first_name} ${u.last_name || ''}`.trim() : '';
+                                          })()}
+                                          className="w-5 h-5 rounded-full"
+                                          referrerPolicy="no-referrer"
+                                        />
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="py-8 text-center text-slate-400">
+                                <p className="text-sm italic">No tasks in this project yet.</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {projects.filter(p => p.team_id === selectedTeam.id).length === 0 && (
+                    <div className="py-20 text-center bg-slate-50 rounded-[40px] border-2 border-dashed border-slate-200">
+                      <div className="w-20 h-20 bg-white rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-sm">
+                        <FolderKanban size={40} className="text-slate-300" />
+                      </div>
+                      <h3 className="text-xl font-bold text-slate-800 mb-2">No projects yet</h3>
+                      <button onClick={() => setIsAddingProject(true)} className="px-6 py-3 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold hover:border-emerald-500 hover:text-emerald-600 transition-all">Create Project</button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : currentView === 'users' ? (
+            <div className="max-w-5xl mx-auto space-y-8 py-12">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-4xl font-black tracking-tight text-slate-900 leading-tight">User Management</h2>
+                  <p className="text-slate-500 font-medium mt-1">Manage human operators and Digital Intelligences (DI)</p>
+                </div>
                 <button 
-                  onClick={() => setIsAddingProject(true)}
-                  className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all hover:scale-105 active:scale-95"
+                  onClick={() => setIsAddingUser(true)}
+                  className="flex items-center gap-2 px-8 py-4 bg-emerald-600 text-white rounded-[24px] font-bold shadow-xl shadow-emerald-200 hover:bg-emerald-700 transition-all hover:scale-105 active:scale-95"
                 >
                   <Plus size={20} />
-                  New Project
+                  Add User
                 </button>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {projects.filter(p => p.team_id === selectedTeam.id).map(project => (
-                  <button
-                    key={project.id}
-                    onClick={() => setSelectedProject(project)}
-                    className="group bg-white border border-slate-200 rounded-[32px] p-8 text-left hover:border-emerald-500 hover:shadow-xl hover:shadow-emerald-100 transition-all relative overflow-hidden"
-                  >
-                    <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-50 rounded-full -mr-16 -mt-16 group-hover:bg-emerald-100 transition-colors" />
-                    <div className="relative z-10">
-                      <div className="w-12 h-12 bg-slate-50 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-emerald-600 group-hover:text-white transition-all">
-                        <FolderKanban size={24} />
-                      </div>
-                      <h3 className="text-xl font-black text-slate-900 mb-2 group-hover:text-emerald-700 transition-colors">{project.name}</h3>
-                      <p className="text-sm text-slate-500 font-medium line-clamp-2 mb-6">{project.description || 'No description provided.'}</p>
-                      
-                      <div className="flex items-center justify-between pt-6 border-t border-slate-100">
-                        <div className="flex items-center gap-2">
-                          <div className="flex -space-x-2">
-                            {[1, 2, 3].map(i => (
-                              <div key={i} className="w-6 h-6 rounded-full bg-slate-200 border-2 border-white" />
-                            ))}
-                          </div>
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Team</span>
+                {users.map(user => (
+                  <div key={user.id} className="bg-white border border-slate-200 rounded-[32px] p-6 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden group flex flex-col justify-between min-h-[300px]">
+                    <div>
+                      {user.is_di ? (
+                        <div className="absolute top-0 right-0 bg-emerald-100 text-emerald-700 text-[10px] font-black px-4 py-1 rounded-bl-2xl uppercase tracking-widest">
+                          Digital Intelligence
                         </div>
-                        <ChevronRight size={16} className="text-slate-300 group-hover:text-emerald-600 group-hover:translate-x-1 transition-all" />
+                      ) : null}
+                      <div className="flex items-start gap-4">
+                        <div className="w-16 h-16 rounded-3xl overflow-hidden shadow-sm ring-2 ring-slate-50 group-hover:ring-emerald-200 transition-all flex-shrink-0">
+                          <img 
+                            src={user.avatar_url} 
+                            alt={`${user.first_name} ${user.last_name || ''}`} 
+                            className="w-full h-full object-cover" 
+                            referrerPolicy="no-referrer" 
+                          />
+                        </div>
+                        <div className="flex-grow pt-1 min-w-0">
+                          <h3 className="text-xl font-black text-slate-900 truncate">
+                            {user.first_name} {user.last_name || ''}
+                          </h3>
+                          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-0.5">{user.user_type}</p>
+                        </div>
+                      </div>
+                      
+                      <div className="mt-8 space-y-3 pt-6 border-t border-slate-50">
+                        <div className="flex items-center gap-3 text-slate-500">
+                          <div className="w-8 h-8 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 flex-shrink-0">
+                            <Mail size={14} />
+                          </div>
+                          <span className="text-sm font-medium truncate" title={user.email}>{user.email}</span>
+                        </div>
+                        <div className="flex items-center gap-3 text-slate-500">
+                          <div className="w-8 h-8 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 flex-shrink-0">
+                            <Phone size={14} />
+                          </div>
+                          <span className="text-sm font-medium truncate">{user.phone || 'No phone set'}</span>
+                        </div>
                       </div>
                     </div>
-                  </button>
-                ))}
-                
-                {projects.filter(p => p.team_id === selectedTeam.id).length === 0 && (
-                  <div className="col-span-full py-20 text-center bg-slate-50 rounded-[40px] border-2 border-dashed border-slate-200">
-                    <div className="w-20 h-20 bg-white rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-sm">
-                      <FolderKanban size={40} className="text-slate-300" />
+
+                    <div className="mt-6 pt-4 border-t border-slate-50 flex items-center justify-end gap-2">
+                      <button 
+                        onClick={() => {
+                          setEditingUser(user);
+                          setEditingUserFirstName(user.first_name);
+                          setEditingUserLastName(user.last_name || '');
+                          setEditingUserEmail(user.email);
+                          setEditingUserPhone(user.phone || '');
+                          setEditingUserIsDI(!!user.is_di);
+                          setEditingUserType(user.user_type);
+                        }}
+                        className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-all"
+                        title="Edit User"
+                      >
+                        <Edit2 size={16} />
+                      </button>
+                      <button 
+                        onClick={() => deleteUser(user.id)}
+                        className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all"
+                        title="Delete User"
+                      >
+                        <Trash2 size={16} />
+                      </button>
                     </div>
-                    <h3 className="text-xl font-bold text-slate-800 mb-2">No projects yet</h3>
-                    <p className="text-slate-500 max-w-xs mx-auto mb-8">Get started by creating your first project for this team.</p>
-                    <button 
-                      onClick={() => setIsAddingProject(true)}
-                      className="inline-flex items-center gap-2 px-6 py-3 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold hover:border-emerald-500 hover:text-emerald-600 transition-all"
-                    >
-                      <Plus size={20} />
-                      Create Project
-                    </button>
                   </div>
-                )}
+                ))}
               </div>
             </div>
           ) : (
@@ -2504,7 +2880,10 @@ export default function App() {
                               {task.assignee_id && (
                                 <img 
                                   src={users.find(u => u.id === task.assignee_id)?.avatar_url} 
-                                  alt="" 
+                                  alt={(() => {
+                                    const u = users.find(usr => usr.id === task.assignee_id);
+                                    return u ? `${u.first_name} ${u.last_name || ''}`.trim() : '';
+                                  })()}
                                   className="w-6 h-6 rounded-full ml-1"
                                   referrerPolicy="no-referrer"
                                 />
@@ -2516,7 +2895,7 @@ export default function App() {
                               >
                                 <option value="">Unassigned</option>
                                 {users.map(u => (
-                                  <option key={u.id} value={u.id}>{u.name}</option>
+                                  <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
                                 ))}
                               </select>
                             </div>
@@ -2586,7 +2965,7 @@ export default function App() {
                                         className="bg-white border border-emerald-100 rounded px-2 py-1 text-[10px] text-emerald-700 focus:outline-none focus:border-emerald-500 flex-grow"
                                       >
                                         <option value="">No Section</option>
-                                        {(allSections[pid] || []).map(s => (
+                                        {allSections.filter(s => Number(s.project_id) === Number(pid)).map(s => (
                                           <option key={s.id} value={s.id}>{s.name}</option>
                                         ))}
                                       </select>
@@ -2781,6 +3160,10 @@ export default function App() {
                       { method: 'POST', path: '/sections', desc: 'Create a new section' },
                       { method: 'PATCH', path: '/sections/:id', desc: 'Update section details' },
                       { method: 'DELETE', path: '/sections/:id', desc: 'Delete a section' },
+                      { method: 'GET', path: '/users', desc: 'Fetch all users' },
+                      { method: 'POST', path: '/users', desc: 'Create a new user' },
+                      { method: 'PATCH', path: '/users/:id', desc: 'Update user details' },
+                      { method: 'DELETE', path: '/users/:id', desc: 'Delete a user' },
                       { method: 'POST', path: '/comments', desc: 'Add a comment/log to task/subtask' },
                       { method: 'DELETE', path: '/comments/:id', desc: 'Delete a comment' },
                     ].map((api, i) => (
@@ -2804,6 +3187,278 @@ export default function App() {
                 <p className="text-center text-xs text-slate-400 font-medium">
                   &copy; 2026 Roots Task Management. Built with React & Emerald Design System.
                 </p>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Add User Modal */}
+      <AnimatePresence>
+        {isAddingUser && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-8"
+            onClick={(e) => e.target === e.currentTarget && setIsAddingUser(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white rounded-[40px] w-full max-w-lg p-10 shadow-2xl relative overflow-hidden"
+            >
+              <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-50 rounded-full -mr-16 -mt-16 opacity-50" />
+              <div className="relative z-10 space-y-8">
+                <div>
+                  <h2 className="text-3xl font-black tracking-tight text-slate-900">Create New User</h2>
+                  <p className="text-slate-500 font-medium">Add a Human or Digital Intelligence to your workspace</p>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="p-2 bg-slate-100 rounded-2xl flex gap-2">
+                    <button 
+                      onClick={() => {
+                        setNewUserIsDI(false);
+                        setNewUserType('Human User');
+                      }}
+                      className={`flex-grow py-3 px-4 rounded-xl font-bold text-sm transition-all ${!newUserIsDI ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      Human
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setNewUserIsDI(true);
+                        setNewUserType('DI User');
+                      }}
+                      className={`flex-grow py-3 px-4 rounded-xl font-bold text-sm transition-all ${newUserIsDI ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      DI
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">First Name</label>
+                      <input 
+                        type="text"
+                        value={newUserFirstName}
+                        onChange={(e) => setNewUserFirstName(e.target.value)}
+                        placeholder="e.g. John"
+                        className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                      />
+                    </div>
+                    {!newUserIsDI && (
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Last Name</label>
+                        <input 
+                          type="text"
+                          value={newUserLastName}
+                          onChange={(e) => setNewUserLastName(e.target.value)}
+                          placeholder="e.g. Smith"
+                          className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Email Address</label>
+                    <input 
+                      type="email"
+                      value={newUserEmail}
+                      onChange={(e) => setNewUserEmail(e.target.value)}
+                      placeholder="e.g. user@example.com"
+                      className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Phone Number</label>
+                    <input 
+                      type="tel"
+                      value={newUserPhone}
+                      onChange={(e) => setNewUserPhone(e.target.value)}
+                      placeholder="e.g. +1 555 0123"
+                      className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">User Type</label>
+                    <select 
+                      value={newUserType}
+                      onChange={(e) => setNewUserType(e.target.value as any)}
+                      className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                    >
+                      {!newUserIsDI ? (
+                        <>
+                          <option value="Human Super Admin">Human Super Admin</option>
+                          <option value="Human Admin">Human Admin</option>
+                          <option value="Human User">Human User</option>
+                        </>
+                      ) : (
+                        <>
+                          <option value="DI Super Admin">DI Super Admin</option>
+                          <option value="DI Admin">DI Admin</option>
+                          <option value="DI User">DI User</option>
+                        </>
+                      )}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button 
+                    onClick={() => setIsAddingUser(false)}
+                    className="flex-grow py-4 border border-slate-200 text-slate-600 rounded-[20px] font-bold hover:bg-slate-50 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={addUser}
+                    className="flex-grow py-4 bg-emerald-600 text-white rounded-[20px] font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all"
+                  >
+                    Create User
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit User Modal */}
+      <AnimatePresence>
+        {editingUser && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-8"
+            onClick={(e) => e.target === e.currentTarget && setEditingUser(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white rounded-[40px] w-full max-w-lg p-10 shadow-2xl relative overflow-hidden"
+            >
+              <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-50 rounded-full -mr-16 -mt-16 opacity-50" />
+              <div className="relative z-10 space-y-8">
+                <div>
+                  <h2 className="text-3xl font-black tracking-tight text-slate-900">Edit User</h2>
+                  <p className="text-slate-500 font-medium">Modify operator or Digital Intelligence settings</p>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="p-2 bg-slate-100 rounded-2xl flex gap-2">
+                    <button 
+                      onClick={() => {
+                        setEditingUserIsDI(false);
+                        setEditingUserType('Human User');
+                      }}
+                      className={`flex-grow py-3 px-4 rounded-xl font-bold text-sm transition-all ${!editingUserIsDI ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      Human
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setEditingUserIsDI(true);
+                        setEditingUserType('DI User');
+                      }}
+                      className={`flex-grow py-3 px-4 rounded-xl font-bold text-sm transition-all ${editingUserIsDI ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      DI
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">First Name</label>
+                      <input 
+                        type="text"
+                        value={editingUserFirstName}
+                        onChange={(e) => setEditingUserFirstName(e.target.value)}
+                        placeholder="e.g. John"
+                        className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                      />
+                    </div>
+                    {!editingUserIsDI && (
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Last Name</label>
+                        <input 
+                          type="text"
+                          value={editingUserLastName}
+                          onChange={(e) => setEditingUserLastName(e.target.value)}
+                          placeholder="e.g. Smith"
+                          className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Email Address</label>
+                    <input 
+                      type="email"
+                      value={editingUserEmail}
+                      onChange={(e) => setEditingUserEmail(e.target.value)}
+                      placeholder="e.g. user@example.com"
+                      className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Phone Number</label>
+                    <input 
+                      type="tel"
+                      value={editingUserPhone}
+                      onChange={(e) => setEditingUserPhone(e.target.value)}
+                      placeholder="e.g. +1 555 0123"
+                      className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">User Type</label>
+                    <select 
+                      value={editingUserType}
+                      onChange={(e) => setEditingUserType(e.target.value as any)}
+                      className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                    >
+                      {!editingUserIsDI ? (
+                        <>
+                          <option value="Human Super Admin">Human Super Admin</option>
+                          <option value="Human Admin">Human Admin</option>
+                          <option value="Human User">Human User</option>
+                        </>
+                      ) : (
+                        <>
+                          <option value="DI Super Admin">DI Super Admin</option>
+                          <option value="DI Admin">DI Admin</option>
+                          <option value="DI User">DI User</option>
+                        </>
+                      )}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button 
+                    onClick={() => setEditingUser(null)}
+                    className="flex-grow py-4 border border-slate-200 text-slate-600 rounded-[20px] font-bold hover:bg-slate-50 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={editUser}
+                    className="flex-grow py-4 bg-emerald-600 text-white rounded-[20px] font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all"
+                  >
+                    Save Changes
+                  </button>
+                </div>
               </div>
             </motion.div>
           </motion.div>

@@ -47,9 +47,13 @@ export interface Section {
 
 export interface User {
   id: number;
-  name: string;
+  first_name: string;
+  last_name?: string;
   email: string;
-  avatar_url: string;
+  phone?: string;
+  avatar_url?: string;
+  is_di: boolean;
+  user_type: 'Human Super Admin' | 'DI Super Admin' | 'Human Admin' | 'DI Admin' | 'Human User' | 'DI User';
 }
 
 export interface Task {

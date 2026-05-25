@@ -14,9 +14,13 @@ db.pragma('foreign_keys = ON');
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
+    first_name TEXT NOT NULL,
+    last_name TEXT,
     email TEXT UNIQUE NOT NULL,
+    phone TEXT,
     avatar_url TEXT,
+    is_di BOOLEAN DEFAULT 0,
+    user_type TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -157,13 +161,13 @@ if (teamCount.count === 0) {
 const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
 if (userCount.count === 0) {
   const users = [
-    { name: "John Doe", email: "john@example.com", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=John" },
-    { name: "Jane Smith", email: "jane@example.com", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=Jane" },
-    { name: "Bob Wilson", email: "bob@example.com", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=Bob" }
+    { first_name: "John", last_name: "Doe", email: "john@example.com", is_di: 0, user_type: "Human Super Admin", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=John" },
+    { first_name: "DI Assistant", last_name: "", email: "assistant@di.com", is_di: 1, user_type: "DI Super Admin", avatar_url: "https://api.dicebear.com/7.x/bottts/svg?seed=DI" },
+    { first_name: "Jane", last_name: "Smith", email: "jane@example.com", is_di: 0, user_type: "Human Admin", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=Jane" }
   ];
-  const stmt = db.prepare("INSERT INTO users (name, email, avatar_url) VALUES (?, ?, ?)");
+  const stmt = db.prepare("INSERT INTO users (first_name, last_name, email, is_di, user_type, avatar_url) VALUES (?, ?, ?, ?, ?, ?)");
   for (const user of users) {
-    stmt.run(user.name, user.email, user.avatar_url);
+    stmt.run(user.first_name, user.last_name, user.email, user.is_di, user.user_type, user.avatar_url);
   }
 }
 
@@ -204,8 +208,82 @@ async function startServer() {
   });
 
   apiRouter.get("/users", (req, res) => {
-    const users = db.prepare("SELECT * FROM users ORDER BY name ASC").all();
+    const users = db.prepare("SELECT * FROM users ORDER BY first_name ASC").all();
     res.json(users);
+  });
+
+  apiRouter.post("/users", (req, res) => {
+    const { first_name, last_name, email, phone, is_di, user_type } = req.body;
+    if (!first_name || !email || !user_type) {
+      return res.status(400).json({ error: "First name, email, and user type are required" });
+    }
+    const avatar_url = is_di 
+      ? `https://api.dicebear.com/7.x/bottts/svg?seed=${first_name}` 
+      : `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name}`;
+    
+    try {
+      const info = db.prepare("INSERT INTO users (first_name, last_name, email, phone, is_di, user_type, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(first_name, last_name || null, email, phone || null, is_di ? 1 : 0, user_type, avatar_url);
+      res.status(201).json(db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid));
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  apiRouter.patch("/users/:id", (req, res) => {
+    const { id } = req.params;
+    const { first_name, last_name, email, phone, is_di, user_type } = req.body;
+    
+    const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id) as any;
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const updates: string[] = [];
+    const values: any[] = [];
+
+    if (first_name !== undefined) { updates.push("first_name = ?"); values.push(first_name); }
+    if (last_name !== undefined) { updates.push("last_name = ?"); values.push(last_name || null); }
+    if (email !== undefined) { updates.push("email = ?"); values.push(email); }
+    if (phone !== undefined) { updates.push("phone = ?"); values.push(phone || null); }
+    if (is_di !== undefined) { updates.push("is_di = ?"); values.push(is_di ? 1 : 0); }
+    if (user_type !== undefined) { updates.push("user_type = ?"); values.push(user_type); }
+
+    const final_name = first_name !== undefined ? first_name : user.first_name;
+    const final_is_di = is_di !== undefined ? (is_di ? 1 : 0) : user.is_di;
+    if (first_name !== undefined || is_di !== undefined) {
+      const avatar_url = final_is_di 
+        ? `https://api.dicebear.com/7.x/bottts/svg?seed=${final_name}` 
+        : `https://api.dicebear.com/7.x/avataaars/svg?seed=${final_name}`;
+      updates.push("avatar_url = ?");
+      values.push(avatar_url);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    values.push(id);
+
+    try {
+      db.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+      res.json(db.prepare("SELECT * FROM users WHERE id = ?").get(id));
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  apiRouter.delete("/users/:id", (req, res) => {
+    const { id } = req.params;
+    try {
+      const info = db.prepare("DELETE FROM users WHERE id = ?").run(id);
+      if (info.changes === 0) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      res.status(204).send();
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
   });
 
   apiRouter.post("/organizations", (req, res) => {
