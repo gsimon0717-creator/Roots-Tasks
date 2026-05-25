@@ -45,6 +45,7 @@ try {
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
     first_name TEXT NOT NULL,
     last_name TEXT,
     email TEXT UNIQUE NOT NULL,
@@ -196,9 +197,10 @@ if (userCount.count === 0) {
     { first_name: "DI Assistant", last_name: "", email: "assistant@di.com", is_di: 1, user_type: "DI Super Admin", avatar_url: "https://api.dicebear.com/7.x/bottts/svg?seed=DI" },
     { first_name: "Jane", last_name: "Smith", email: "jane@example.com", is_di: 0, user_type: "Human Admin", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=Jane" }
   ];
-  const stmt = db.prepare("INSERT INTO users (first_name, last_name, email, is_di, user_type, avatar_url) VALUES (?, ?, ?, ?, ?, ?)");
+  const stmt = db.prepare("INSERT INTO users (name, first_name, last_name, email, is_di, user_type, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?)");
   for (const user of users) {
-    stmt.run(user.first_name, user.last_name, user.email, user.is_di, user.user_type, user.avatar_url);
+    const name = user.last_name ? `${user.first_name} ${user.last_name}` : user.first_name;
+    stmt.run(name, user.first_name, user.last_name || null, user.email, user.is_di, user.user_type, user.avatar_url);
   }
 }
 
@@ -252,9 +254,11 @@ async function startServer() {
       ? `https://api.dicebear.com/7.x/bottts/svg?seed=${first_name}` 
       : `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name}`;
     
+    const name = last_name ? `${first_name} ${last_name}` : first_name;
+    
     try {
-      const info = db.prepare("INSERT INTO users (first_name, last_name, email, phone, is_di, user_type, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(first_name, last_name || null, email, phone || null, is_di ? 1 : 0, user_type, avatar_url);
+      const info = db.prepare("INSERT INTO users (name, first_name, last_name, email, phone, is_di, user_type, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(name, first_name, last_name || null, email, phone || null, is_di ? 1 : 0, user_type, avatar_url);
       res.status(201).json(db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid));
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -279,6 +283,14 @@ async function startServer() {
     if (phone !== undefined) { updates.push("phone = ?"); values.push(phone || null); }
     if (is_di !== undefined) { updates.push("is_di = ?"); values.push(is_di ? 1 : 0); }
     if (user_type !== undefined) { updates.push("user_type = ?"); values.push(user_type); }
+
+    if (first_name !== undefined || last_name !== undefined) {
+      const updatedFirstName = first_name !== undefined ? first_name : user.first_name;
+      const updatedLastName = last_name !== undefined ? last_name : user.last_name;
+      const computedName = updatedLastName ? `${updatedFirstName} ${updatedLastName}`.trim() : updatedFirstName;
+      updates.push("name = ?");
+      values.push(computedName);
+    }
 
     const final_name = first_name !== undefined ? first_name : user.first_name;
     const final_is_di = is_di !== undefined ? (is_di ? 1 : 0) : user.is_di;
