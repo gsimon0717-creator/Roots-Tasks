@@ -173,6 +173,29 @@ try {
   // Already exists
 }
 
+// Migration: Add divisions table and division_id columns
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS divisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      organization_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (organization_id) REFERENCES organizations (id) ON DELETE CASCADE
+    );
+  `);
+} catch (e: any) {
+  console.error("Migration/Setup of divisions table failed:", e);
+}
+
+try {
+  db.prepare("ALTER TABLE teams ADD COLUMN division_id INTEGER REFERENCES divisions(id) ON DELETE SET NULL").run();
+} catch (e: any) {}
+
+try {
+  db.prepare("ALTER TABLE tasks ADD COLUMN division_id INTEGER REFERENCES divisions(id) ON DELETE SET NULL").run();
+} catch (e: any) {}
+
 // Seed default data if empty
 const orgCount = db.prepare("SELECT COUNT(*) as count FROM organizations").get() as { count: number };
 let defaultOrgId: any;
@@ -412,11 +435,53 @@ async function startServer() {
     res.status(204).send();
   });
 
+  // Divisions API
+  apiRouter.get("/divisions", (req, res) => {
+    const { organization_id } = req.query;
+    let divisions;
+    if (organization_id) {
+      divisions = db.prepare("SELECT * FROM divisions WHERE organization_id = ? ORDER BY name ASC").all(organization_id);
+    } else {
+      divisions = db.prepare("SELECT * FROM divisions ORDER BY name ASC").all();
+    }
+    res.json(divisions);
+  });
+
+  apiRouter.post("/divisions", (req, res) => {
+    const { name, organization_id } = req.body;
+    if (!name || !organization_id) {
+      return res.status(400).json({ error: "name and organization_id are required" });
+    }
+    const info = db.prepare("INSERT INTO divisions (name, organization_id) VALUES (?, ?)").run(name, organization_id);
+    res.status(201).json(db.prepare("SELECT * FROM divisions WHERE id = ?").get(info.lastInsertRowid));
+  });
+
+  apiRouter.patch("/divisions/:id", (req, res) => {
+    const { id } = req.params;
+    const { name, organization_id } = req.body;
+    const updates: string[] = [];
+    const values: any[] = [];
+    if (name !== undefined) { updates.push("name = ?"); values.push(name); }
+    if (organization_id !== undefined) { updates.push("organization_id = ?"); values.push(organization_id); }
+    if (updates.length === 0) return res.status(400).json({ error: "No fields to update" });
+    values.push(id);
+    db.prepare(`UPDATE divisions SET ${updates.join(", ")} WHERE id = ?`).run(...values);
+    res.json(db.prepare("SELECT * FROM divisions WHERE id = ?").get(id));
+  });
+
+  apiRouter.delete("/divisions/:id", (req, res) => {
+    const { id } = req.params;
+    db.prepare("DELETE FROM divisions WHERE id = ?").run(id);
+    res.status(204).send();
+  });
+
   // Teams API
   apiRouter.get("/teams", (req, res) => {
-    const { organization_id } = req.query;
+    const { organization_id, division_id } = req.query;
     let teams;
-    if (organization_id) {
+    if (division_id) {
+      teams = db.prepare("SELECT * FROM teams WHERE division_id = ? ORDER BY name ASC").all(division_id);
+    } else if (organization_id) {
       teams = db.prepare("SELECT * FROM teams WHERE organization_id = ? ORDER BY name ASC").all(organization_id);
     } else {
       teams = db.prepare("SELECT * FROM teams ORDER BY name ASC").all();
@@ -426,7 +491,7 @@ async function startServer() {
 
   apiRouter.post("/teams", (req, res) => {
     const { name } = req.body;
-    let { organization_id } = req.body;
+    let { organization_id, division_id } = req.body;
     
     if (!name) return res.status(400).json({ error: "Name is required" });
     
@@ -438,17 +503,18 @@ async function startServer() {
       }
     }
     
-    const info = db.prepare("INSERT INTO teams (name, organization_id) VALUES (?, ?)").run(name, organization_id || null);
+    const info = db.prepare("INSERT INTO teams (name, organization_id, division_id) VALUES (?, ?, ?)").run(name, organization_id || null, division_id || null);
     res.status(201).json(db.prepare("SELECT * FROM teams WHERE id = ?").get(info.lastInsertRowid));
   });
 
   apiRouter.patch("/teams/:id", (req, res) => {
     const { id } = req.params;
-    const { name, organization_id } = req.body;
+    const { name, organization_id, division_id } = req.body;
     const updates: string[] = [];
     const values: any[] = [];
     if (name !== undefined) { updates.push("name = ?"); values.push(name); }
     if (organization_id !== undefined) { updates.push("organization_id = ?"); values.push(organization_id); }
+    if (division_id !== undefined) { updates.push("division_id = ?"); values.push(division_id); }
     if (updates.length === 0) return res.status(400).json({ error: "No fields to update" });
     values.push(id);
     db.prepare(`UPDATE teams SET ${updates.join(", ")} WHERE id = ?`).run(...values);
@@ -576,7 +642,7 @@ async function startServer() {
   });
 
   apiRouter.post("/tasks", (req, res) => {
-    const { title, description, priority, due_date, key_result, project_ids, section_id, organization_id, team_id, org_id, assignee_id } = req.body;
+    const { title, description, priority, due_date, key_result, project_ids, section_id, organization_id, team_id, division_id, org_id, assignee_id } = req.body;
     if (!title) return res.status(400).json({ error: "Title is required" });
     
     try {
@@ -584,8 +650,8 @@ async function startServer() {
       
       const performInsert = db.transaction(() => {
         const info = db.prepare(
-          "INSERT INTO tasks (title, description, priority, due_date, key_result, organization_id, team_id, assignee_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        ).run(title, description || "", priority || "moderate", due_date || null, key_result || "", organization_id || org_id || null, team_id || null, assignee_id || null);
+          "INSERT INTO tasks (title, description, priority, due_date, key_result, organization_id, team_id, division_id, assignee_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(title, description || "", priority || "moderate", due_date || null, key_result || "", organization_id || org_id || null, team_id || null, division_id || null, assignee_id || null);
         
         taskId = info.lastInsertRowid;
         
@@ -639,6 +705,14 @@ async function startServer() {
           console.log(`Setting team_id to ${teamIdToUse} for task ${id}`);
           updates.push("team_id = ?"); 
           values.push(teamIdToUse); 
+        }
+
+        // Aliases for division_id
+        const divIdToUse = body.division_id ?? body.divisionId;
+        if (divIdToUse !== undefined) { 
+          console.log(`Setting division_id to ${divIdToUse} for task ${id}`);
+          updates.push("division_id = ?"); 
+          values.push(divIdToUse); 
         }
         
         if (updates.length > 0) {
