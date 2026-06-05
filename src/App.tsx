@@ -222,6 +222,7 @@ export default function App() {
   const [editingTaskDueDate, setEditingTaskDueDate] = useState('');
   const [editingTaskKeyResult, setEditingTaskKeyResult] = useState('');
   const [editingTaskProjectIds, setEditingTaskProjectIds] = useState<number[]>([]);
+  const [editingDueDateTaskId, setEditingDueDateTaskId] = useState<number | null>(null);
 
   const [editingSubtaskId, setEditingSubtaskId] = useState<number | null>(null);
   const [editingSubtaskTitle, setEditingSubtaskTitle] = useState('');
@@ -283,6 +284,9 @@ export default function App() {
   // User list password states
   const [newUserPassword, setNewUserPassword] = useState('password');
   const [editingUserPassword, setEditingUserPassword] = useState('');
+  
+  // Track selected Type for "Grant New Scope" dropdown in user cards
+  const [userScopeType, setUserScopeType] = useState<Record<number, 'organization' | 'division' | 'team' | 'project'>>({});
 
   // Permission checks (using divisions, teams, projects from states)
   const getOrganizationOfDivision = (divId: number | null | undefined): number | null => {
@@ -1464,6 +1468,664 @@ export default function App() {
     );
   }
 
+  const renderSectionTasksTable = (sectionTasks: Task[]) => {
+    return (
+      <div className="bg-white border border-slate-200 rounded-[24px] overflow-hidden shadow-sm animate-fade-in">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="border-b border-slate-100 bg-slate-50/75 select-none text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+              <th className="px-6 py-3 w-16 text-center">Status</th>
+              <th className="px-6 py-3">Task Title</th>
+              <th className="px-6 py-3 w-44">Assignee</th>
+              <th className="px-6 py-3 w-48">Key Result</th>
+              <th className="px-6 py-3 w-32">Priority</th>
+              <th className="px-6 py-3 w-36">Due Date</th>
+              <th className="px-6 py-3 w-24 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <AnimatePresence mode="popLayout">
+              {sectionTasks.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-6 py-8 text-center text-slate-400 text-xs font-semibold">
+                    No tasks inside this section
+                  </td>
+                </tr>
+              ) : (
+                sectionTasks.map((task) => (
+                  <React.Fragment key={task.id}>
+                    {editingTaskId === task.id ? (
+                      <tr className="border-b border-slate-100 bg-slate-50/30">
+                        <td colSpan={7} className="px-6 py-4">
+                          <div className="space-y-4">
+                            <input
+                              autoFocus
+                              type="text"
+                              value={editingTaskTitle}
+                              onChange={(e) => setEditingTaskTitle(e.target.value)}
+                              className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-emerald-500 shadow-sm"
+                            />
+                            <div className="flex flex-wrap gap-4">
+                              <div className="flex items-center gap-2">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Priority</label>
+                                <select 
+                                  value={editingTaskPriority}
+                                  onChange={(e) => setEditingTaskPriority(e.target.value as Task['priority'])}
+                                  className="bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500"
+                                >
+                                  <option value="low">Low</option>
+                                  <option value="moderate">Moderate</option>
+                                  <option value="high">High</option>
+                                  <option value="urgent">Urgent</option>
+                                </select>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Due Date</label>
+                                <input 
+                                  type="date"
+                                  value={editingTaskDueDate}
+                                  onChange={(e) => setEditingTaskDueDate(e.target.value)}
+                                  className="bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500"
+                                />
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Key Result</label>
+                                <input 
+                                  type="text"
+                                  value={editingTaskKeyResult}
+                                  onChange={(e) => setEditingTaskKeyResult(e.target.value)}
+                                  className="bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500 w-48"
+                                />
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Project</label>
+                                {(() => {
+                                  const pForOrg = projects.find(proj => task.project_ids.includes(proj.id));
+                                  const tForOrg = teams.find(team => team.id === pForOrg?.team_id);
+                                  const tOrgId = task.organization_id || tForOrg?.organization_id;
+                                  const tTeamId = task.team_id || pForOrg?.team_id;
+
+                                  return (
+                                    <select 
+                                      multiple
+                                      value={editingTaskProjectIds.map(String)}
+                                      onChange={(e) => setEditingTaskProjectIds(Array.from(e.target.selectedOptions).map((o: any) => Number(o.value)))}
+                                      className="bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500 min-w-32"
+                                    >
+                                      {projects.filter(p => {
+                                        if (tTeamId) {
+                                          return p.team_id === Number(tTeamId);
+                                        }
+                                        if (tOrgId) {
+                                          const team = teams.find(t => t.id === p.team_id);
+                                          return team?.organization_id === Number(tOrgId);
+                                        }
+                                        return p.team_id === (selectedTeam?.id || p.team_id);
+                                      }).map(p => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                      ))}
+                                    </select>
+                                  );
+                                })()}
+                              </div>
+                            </div>
+                            <div className="flex gap-2">
+                              <button onClick={() => updateTaskDetails(task.id, { title: editingTaskTitle, priority: editingTaskPriority, due_date: editingTaskDueDate, key_result: editingTaskKeyResult, project_ids: editingTaskProjectIds })} className="bg-emerald-600 text-white px-4 py-1.5 rounded-lg text-xs font-bold shadow-sm hover:bg-emerald-700 transition-colors">Update</button>
+                              <button onClick={() => setEditingTaskId(null)} className="text-slate-400 px-4 py-1.5 text-xs font-bold hover:text-slate-600">Cancel</button>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : (
+                      <>
+                        <tr 
+                          className={`border-b border-slate-100 hover:bg-slate-50/50 transition-colors group cursor-pointer ${task.status === 'completed' ? 'opacity-65' : ''}`}
+                          onClick={() => setExpandedTaskId(expandedTaskId === task.id ? null : task.id)}
+                        >
+                          {/* Status */}
+                          <td className="px-6 py-4 text-center" onClick={(e) => e.stopPropagation()}>
+                            <button 
+                              onClick={() => updateTaskStatus(task.id, task.status === 'completed' ? 'pending' : 'completed')}
+                              className={`transition-colors ${task.status === 'completed' ? 'text-emerald-500' : 'text-slate-300 hover:text-emerald-500'}`}
+                            >
+                              {task.status === 'completed' ? <CheckCircle2 size={20} /> : <Circle size={20} />}
+                            </button>
+                          </td>
+
+                          {/* Task Title */}
+                          <td className="px-6 py-4">
+                            <span className={`text-sm font-bold text-left hover:text-emerald-600 transition-colors ${task.status === 'completed' ? 'line-through text-slate-400 font-medium' : 'text-slate-800'}`}>
+                              {task.title}
+                            </span>
+                          </td>
+
+                          {/* Assignee */}
+                          <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center gap-2">
+                              {task.assignee_id && (
+                                <img 
+                                  src={users.find(u => u.id === task.assignee_id)?.avatar_url} 
+                                  alt="Assignee Avatar"
+                                  className="w-5 h-5 rounded-full ring-1 ring-slate-100"
+                                  referrerPolicy="no-referrer"
+                                />
+                              )}
+                              <select
+                                value={task.assignee_id || ''}
+                                onChange={(e) => assignTaskToUser(task.id, e.target.value ? Number(e.target.value) : null)}
+                                className="bg-transparent border-none focus:ring-0 text-xs font-semibold text-slate-600 cursor-pointer p-0 w-full"
+                              >
+                                <option value="">Unassigned</option>
+                                {users.map(u => (
+                                  <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </td>
+
+                          {/* Key Result */}
+                          <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="text"
+                              value={task.key_result || ''}
+                              onChange={(e) => updateTaskDetails(task.id, { key_result: e.target.value })}
+                              placeholder="Add key result..."
+                              className="text-xs text-slate-500 font-medium bg-transparent border-none focus:ring-2 focus:ring-emerald-500/20 rounded-lg px-2 py-1 w-full"
+                            />
+                          </td>
+
+                          {/* Priority */}
+                          <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                            <select
+                              value={task.priority}
+                              onChange={(e) => updateTaskDetails(task.id, { priority: e.target.value as any })}
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wider cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500/20 appearance-none text-center ${getPriorityColor(task.priority)}`}
+                            >
+                              <option value="low">Low</option>
+                              <option value="moderate">Moderate</option>
+                              <option value="high">High</option>
+                              <option value="urgent">Urgent</option>
+                            </select>
+                          </td>
+
+                          {/* Due Date */}
+                          <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                            {task.due_date || editingDueDateTaskId === task.id ? (
+                              <input
+                                autoFocus={editingDueDateTaskId === task.id}
+                                type="date"
+                                value={task.due_date ? task.due_date.split('T')[0] : ''}
+                                onChange={(e) => {
+                                  updateTaskDetails(task.id, { due_date: e.target.value });
+                                  if (e.target.value) {
+                                    setEditingDueDateTaskId(null);
+                                  }
+                                }}
+                                onBlur={() => setEditingDueDateTaskId(null)}
+                                className="text-xs text-slate-500 font-semibold bg-transparent border-none focus:ring-2 focus:ring-emerald-500/20 rounded-lg px-2 py-1 cursor-pointer"
+                              />
+                            ) : (
+                              <span 
+                                onClick={() => setEditingDueDateTaskId(task.id)}
+                                className="text-xs text-slate-400 hover:text-emerald-600 font-semibold cursor-pointer px-2 py-1 select-none"
+                              >
+                                —
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Actions */}
+                          <td className="px-6 py-4 text-right" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button 
+                                onClick={() => {
+                                  setEditingTaskId(task.id);
+                                  setEditingTaskTitle(task.title);
+                                  setEditingTaskPriority(task.priority);
+                                  setEditingTaskDueDate(task.due_date || '');
+                                  setEditingTaskKeyResult(task.key_result || '');
+                                  setEditingTaskProjectIds(task.project_ids);
+                                }}
+                                className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all"
+                                title="Edit Task"
+                              >
+                                <Edit2 size={14} />
+                              </button>
+                              <button 
+                                onClick={() => deleteTask(task.id)}
+                                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                                title="Delete Task"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                              <button 
+                                onClick={() => setExpandedTaskId(expandedTaskId === task.id ? null : task.id)}
+                                className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all"
+                                title="Expand Details"
+                              >
+                                {expandedTaskId === task.id ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+
+                        {/* Expanded Details Row */}
+                        {expandedTaskId === task.id && (
+                          <tr className="bg-slate-50/40 border-b border-slate-100">
+                            <td colSpan={7} className="px-8 py-6">
+                              <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                className="overflow-hidden space-y-6"
+                              >
+                                {/* Assignee Dropdown */}
+                                <div className="space-y-2">
+                                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                    <UserIcon size={12} /> Assignee
+                                  </h4>
+                                  <div className="pl-4">
+                                    <div className="flex items-center gap-2 max-w-xs bg-white border border-slate-200 rounded-xl p-1.5 focus-within:border-emerald-500 transition-all shadow-xs">
+                                      {task.assignee_id && (
+                                        <img 
+                                          src={users.find(u => u.id === task.assignee_id)?.avatar_url} 
+                                          alt="Avatar"
+                                          className="w-5 h-5 rounded-full ml-1 shrink-0"
+                                          referrerPolicy="no-referrer"
+                                        />
+                                      )}
+                                      <select 
+                                        value={task.assignee_id || ''}
+                                        onChange={(e) => assignTaskToUser(task.id, e.target.value ? Number(e.target.value) : null)}
+                                        className="bg-transparent border-none focus:ring-0 text-xs font-bold text-slate-700 cursor-pointer flex-grow py-1 focus:outline-none"
+                                      >
+                                        <option value="">Unassigned</option>
+                                        {users.map(u => (
+                                          <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Key Result */}
+                                <div className="space-y-2">
+                                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                    <AlertCircle size={12} /> Key Result
+                                  </h4>
+                                  <div className="pl-4">
+                                    <input
+                                      type="text"
+                                      value={task.key_result || ''}
+                                      onChange={(e) => updateTaskDetails(task.id, { key_result: e.target.value })}
+                                      placeholder="What is the key result for this task?"
+                                      className="w-full text-sm bg-white border border-slate-200 rounded-xl px-4 py-2 focus:outline-none focus:border-emerald-500 transition-all shadow-xs"
+                                    />
+                                  </div>
+                                </div>
+
+                                {/* Projects Management */}
+                                <div className="space-y-3">
+                                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                    <FolderKanban size={12} /> Projects & Sections
+                                  </h4>
+                                  <div className="space-y-3 pl-4">
+                                    {task.project_ids.map(pid => {
+                                      const project = projects.find(p => p.id === pid);
+                                      if (!project) return null;
+                                      const projectSections = allSections.filter(s => Number(s.project_id) === Number(pid));
+                                      const currentSectionId = task.section_assignments?.[pid];
+                                      
+                                      return (
+                                        <div key={pid} className="flex flex-col gap-2 p-3 bg-white rounded-xl border border-slate-200 shadow-xs">
+                                          <div className="flex items-center justify-between">
+                                            <div className="flex flex-col">
+                                              <span className="text-xs font-bold text-slate-700">{project.name}</span>
+                                              {(() => {
+                                                const t = teams.find(team => team.id === project.team_id);
+                                                return t ? <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{t.name}</span> : null;
+                                              })()}
+                                            </div>
+                                            <button 
+                                              onClick={() => {
+                                                const newProjectIds = task.project_ids.filter(id => id !== pid);
+                                                updateTaskDetails(task.id, { project_ids: newProjectIds });
+                                              }}
+                                              className="text-[10px] font-bold text-red-500 hover:text-red-600"
+                                            >
+                                              Remove
+                                            </button>
+                                          </div>
+                                          <div className="flex items-center gap-2">
+                                            <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Section:</label>
+                                            <select 
+                                              value={currentSectionId || ''}
+                                              onChange={(e) => {
+                                                const sid = e.target.value ? parseInt(e.target.value) : null;
+                                                updateTaskDetails(task.id, { section_id: sid, current_project_id: pid } as any);
+                                              }}
+                                              className="bg-slate-50 border border-slate-100 rounded px-2 py-1 text-[10px] focus:outline-none focus:border-emerald-500 flex-grow"
+                                            >
+                                              <option value="">No Section</option>
+                                              {projectSections.map(s => (
+                                                <option key={s.id} value={s.id}>{s.name}</option>
+                                              ))}
+                                            </select>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                    
+                                    {/* Add to another project */}
+                                    <div className="flex items-center gap-2 mt-2">
+                                      <Plus size={14} className="text-slate-300" />
+                                      <select 
+                                        value=""
+                                        onChange={(e) => {
+                                          const pid = parseInt(e.target.value);
+                                          if (!task.project_ids.includes(pid)) {
+                                            updateTaskDetails(task.id, { project_ids: [...task.project_ids, pid] });
+                                          }
+                                        }}
+                                        className="text-[10px] bg-transparent border-none focus:ring-0 text-slate-500 font-medium cursor-pointer w-full"
+                                      >
+                                        <option value="" disabled>Add to project...</option>
+                                        {(() => {
+                                          const pForOrg = projects.find(proj => task.project_ids.includes(proj.id));
+                                          const tForOrg = teams.find(team => team.id === pForOrg?.team_id);
+                                          const taskOrgId = task.organization_id || tForOrg?.organization_id || '';
+                                          const taskTeamId = task.team_id || pForOrg?.team_id || '';
+
+                                          return teams
+                                            .filter(t => {
+                                              if (taskTeamId) {
+                                                return t.id === Number(taskTeamId);
+                                              }
+                                              if (taskOrgId) {
+                                                return t.organization_id === Number(taskOrgId);
+                                              }
+                                              return !selectedOrganization || t.organization_id === selectedOrganization.id;
+                                            })
+                                            .map(team => {
+                                              const teamProjects = projects.filter(p => p.team_id === team.id && !task.project_ids.includes(p.id));
+                                              if (teamProjects.length === 0) return null;
+                                              const orgName = organizations.find(o => o.id === team.organization_id)?.name || 'Unassigned';
+                                              return (
+                                                <optgroup key={team.id} label={`${team.name} ${!taskOrgId ? `(${orgName})` : ''}`}>
+                                                  {teamProjects.map(p => (
+                                                    <option key={p.id} value={p.id}>{p.name}</option>
+                                                  ))}
+                                                </optgroup>
+                                              );
+                                            });
+                                        })()}
+                                      </select>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Subtasks */}
+                                <div className="space-y-3">
+                                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                    <CheckCircle2 size={12} /> Subtasks
+                                  </h4>
+                                  <div className="space-y-2 pl-4">
+                                    {task.subtasks?.map(st => (
+                                      <div key={st.id} className="space-y-1">
+                                        <div className="flex items-center gap-3 group/st">
+                                          <button onClick={() => toggleSubtask(st)} className={st.status === 'completed' ? 'text-emerald-500' : 'text-slate-300'}>
+                                            {st.status === 'completed' ? <CheckCircle2 size={16} /> : <Circle size={16} />}
+                                          </button>
+                                          {editingSubtaskId === st.id ? (
+                                            <div className="flex-grow flex items-center gap-2">
+                                              <input
+                                                autoFocus
+                                                type="text"
+                                                value={editingSubtaskTitle}
+                                                onChange={(e) => setEditingSubtaskTitle(e.target.value)}
+                                                className="text-sm bg-slate-50 border border-slate-200 rounded px-2 py-0.5 focus:outline-none focus:border-emerald-500 flex-grow"
+                                                onKeyDown={(e) => e.key === 'Enter' && updateSubtask(st.id, editingSubtaskTitle)}
+                                              />
+                                              <button onClick={() => updateSubtask(st.id, editingSubtaskTitle)} className="text-[10px] font-bold text-emerald-600">Save</button>
+                                              <button onClick={() => setEditingSubtaskId(null)} className="text-[10px] font-bold text-slate-400">Cancel</button>
+                                            </div>
+                                          ) : (
+                                            <>
+                                              <span className={`text-sm flex-grow ${st.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-600'}`}>
+                                                {st.title}
+                                              </span>
+                                              <div className="flex items-center gap-1 opacity-0 group-hover/st:opacity-100 transition-opacity">
+                                                <button 
+                                                  onClick={() => {
+                                                    setEditingSubtaskId(st.id);
+                                                    setEditingSubtaskTitle(st.title);
+                                                  }}
+                                                  className="p-1 text-slate-400 hover:text-emerald-600"
+                                                >
+                                                  <Edit2 size={12} />
+                                                </button>
+                                                <button 
+                                                  onClick={() => deleteSubtask(st.id)}
+                                                  className="p-1 text-slate-400 hover:text-red-500"
+                                                >
+                                                  <Trash2 size={12} />
+                                                </button>
+                                              </div>
+                                            </>
+                                          )}
+                                        </div>
+                                        
+                                        {/* Subtask Comments */}
+                                        {st.comments && st.comments.length > 0 && (
+                                          <div className="mt-2 space-y-2 pl-6 border-l border-slate-100">
+                                            {st.comments.map(comment => (
+                                              <div key={comment.id} className="group/comment bg-slate-50/50 p-2 rounded-lg relative">
+                                                <p className="text-xs text-slate-600">{comment.content}</p>
+                                                {comment.attachment_url && (
+                                                  <a 
+                                                    href={comment.attachment_url} 
+                                                    target="_blank" 
+                                                    rel="noopener noreferrer"
+                                                    className="mt-1 flex items-center gap-1 text-[10px] text-emerald-600 hover:underline"
+                                                  >
+                                                    <Paperclip size={10} />
+                                                    {comment.attachment_name || 'Attachment'}
+                                                  </a>
+                                                )}
+                                                <div className="flex items-center justify-between mt-1">
+                                                  <span className="text-[9px] text-slate-400 font-medium">
+                                                    {new Date(comment.created_at).toLocaleString()}
+                                                  </span>
+                                                  <button 
+                                                    onClick={() => deleteComment(comment.id)}
+                                                    className="opacity-0 group-hover/comment:opacity-100 p-1 text-slate-300 hover:text-red-500 transition-opacity"
+                                                  >
+                                                    <Trash2 size={10} />
+                                                  </button>
+                                                </div>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        )}
+
+                                        {/* Add Subtask Comment */}
+                                        <div className="mt-2 pl-6">
+                                          <div className="flex flex-col gap-2 bg-slate-50/30 p-2 rounded-lg border border-dashed border-slate-200">
+                                            <textarea 
+                                              placeholder="Add a progress log..." 
+                                              value={newCommentContent}
+                                              onChange={(e) => setNewCommentContent(e.target.value)}
+                                              className="text-xs bg-transparent border-none focus:ring-0 placeholder:text-slate-300 resize-none h-12"
+                                            />
+                                            <div className="flex items-center gap-2">
+                                              <input 
+                                                type="text" 
+                                                placeholder="Attach URL (optional)..." 
+                                                value={newCommentAttachmentUrl}
+                                                onChange={(e) => setNewCommentAttachmentUrl(e.target.value)}
+                                                className="flex-grow text-[10px] bg-white border border-slate-200 rounded px-2 py-1 focus:outline-none focus:border-emerald-500"
+                                              />
+                                              <button 
+                                                onClick={() => addComment(undefined, st.id)}
+                                                className="bg-emerald-600 text-white px-3 py-1 rounded text-[10px] font-bold"
+                                              >
+                                                Log
+                                              </button>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ))}
+                                    <div className="flex items-center gap-3">
+                                      <Plus size={16} className="text-slate-300" />
+                                      <input 
+                                        type="text" 
+                                        placeholder="Add subtask..." 
+                                        value={newSubtaskTitle}
+                                        onChange={(e) => setNewSubtaskTitle(e.target.value)}
+                                        className="text-sm bg-transparent border-none focus:ring-0 placeholder:text-slate-300 flex-grow"
+                                        onKeyDown={(e) => e.key === 'Enter' && addSubtask(task.id)}
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Attachments */}
+                                <div className="space-y-3">
+                                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                    <Paperclip size={12} /> Attachments
+                                  </h4>
+                                  <div className="space-y-2 pl-4">
+                                    {task.attachments?.map(at => (
+                                      <div key={at.id} className="group/at flex items-center gap-2">
+                                        <a 
+                                          href={at.url} 
+                                          target="_blank" 
+                                          rel="noopener noreferrer"
+                                          className="flex items-center gap-2 text-sm text-emerald-600 hover:underline"
+                                        >
+                                          <FolderKanban size={14} />
+                                          {at.name}
+                                        </a>
+                                        <button 
+                                          onClick={() => deleteAttachment(at.id)}
+                                          className="opacity-0 group-hover/at:opacity-100 p-1 text-slate-300 hover:text-red-500 transition-opacity"
+                                        >
+                                          <Trash2 size={14} />
+                                        </button>
+                                      </div>
+                                    ))}
+                                    <div className="flex flex-col gap-2 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                                      <input 
+                                        type="text" 
+                                        placeholder="File name..." 
+                                        value={newAttachmentName}
+                                        onChange={(e) => setNewAttachmentName(e.target.value)}
+                                        className="text-xs bg-white border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
+                                      />
+                                      <div className="flex gap-2">
+                                        <input 
+                                          type="text" 
+                                          placeholder="URL..." 
+                                          value={newAttachmentUrl}
+                                          onChange={(e) => setNewAttachmentUrl(e.target.value)}
+                                          className="flex-grow text-xs bg-white border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
+                                        />
+                                        <button 
+                                          onClick={() => addAttachment(task.id)}
+                                          className="bg-emerald-600 text-white px-4 py-2 rounded-lg text-[10px] font-bold"
+                                        >
+                                          Add
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Task Comments */}
+                                <div className="space-y-3">
+                                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                                    <Terminal size={12} /> Progress Logs
+                                  </h4>
+                                  <div className="space-y-3 pl-4">
+                                    {task.comments?.map(comment => (
+                                      <div key={comment.id} className="group/comment bg-slate-50 p-3 rounded-xl border border-slate-100 relative">
+                                        <p className="text-sm text-slate-700 leading-relaxed">{comment.content}</p>
+                                        {comment.attachment_url && (
+                                          <a 
+                                            href={comment.attachment_url} 
+                                            target="_blank" 
+                                            rel="noopener noreferrer"
+                                            className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-emerald-600 hover:bg-emerald-50 transition-colors"
+                                          >
+                                            <Paperclip size={12} />
+                                            {comment.attachment_name || 'View Attachment'}
+                                          </a>
+                                        )}
+                                        <div className="flex items-center justify-between mt-3 pt-2 border-t border-slate-100">
+                                          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                                            {new Date(comment.created_at).toLocaleString()}
+                                          </span>
+                                          <button 
+                                            onClick={() => deleteComment(comment.id)}
+                                            className="opacity-0 group-hover/comment:opacity-100 p-1.5 text-slate-300 hover:text-red-500 transition-all"
+                                          >
+                                            <Trash2 size={14} />
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ))}
+
+                                    <div className="bg-white border border-dashed border-slate-200 rounded-2xl p-4 space-y-3">
+                                      <textarea 
+                                        placeholder="Log your progress on this task..." 
+                                        value={newCommentContent}
+                                        onChange={(e) => setNewCommentContent(e.target.value)}
+                                        className="w-full text-sm bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 focus:outline-none focus:border-emerald-500 resize-none h-24"
+                                      />
+                                      <div className="flex gap-3">
+                                        <div className="flex-grow grid grid-cols-2 gap-2">
+                                          <input 
+                                            type="text" 
+                                            placeholder="Attachment Name (e.g. Screenshot)" 
+                                            value={newCommentAttachmentName}
+                                            onChange={(e) => setNewCommentAttachmentName(e.target.value)}
+                                            className="text-xs bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
+                                          />
+                                          <input 
+                                            type="text" 
+                                            placeholder="Attachment URL" 
+                                            value={newCommentAttachmentUrl}
+                                            onChange={(e) => setNewCommentAttachmentUrl(e.target.value)}
+                                            className="text-xs bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
+                                          />
+                                        </div>
+                                        <button 
+                                          onClick={() => addComment(task.id)}
+                                          className="px-6 py-2 bg-emerald-600 text-white text-xs font-bold rounded-xl hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-100"
+                                        >
+                                          Add Log
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </motion.div>
+                            </td>
+                          </tr>
+                        )}
+                      </>
+                    )}
+                  </React.Fragment>
+                ))
+              )}
+            </AnimatePresence>
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
   return (
     <div className="flex h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden">
       {/* Sidebar */}
@@ -2491,13 +3153,29 @@ export default function App() {
                               <option value="urgent">Urgent</option>
                             </select>
                           </td>
-                          <td className="px-6 py-4">
-                            <input
-                              type="date"
-                              value={task.due_date ? task.due_date.split('T')[0] : ''}
-                              onChange={(e) => updateTaskDetails(task.id, { due_date: e.target.value })}
-                              className="text-xs text-slate-500 font-medium bg-transparent border-none focus:ring-2 focus:ring-emerald-500/20 rounded-lg px-2 py-1 cursor-pointer"
-                            />
+                          <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                            {task.due_date || editingDueDateTaskId === task.id ? (
+                              <input
+                                autoFocus={editingDueDateTaskId === task.id}
+                                type="date"
+                                value={task.due_date ? task.due_date.split('T')[0] : ''}
+                                onChange={(e) => {
+                                  updateTaskDetails(task.id, { due_date: e.target.value });
+                                  if (e.target.value) {
+                                    setEditingDueDateTaskId(null);
+                                  }
+                                }}
+                                onBlur={() => setEditingDueDateTaskId(null)}
+                                className="text-xs text-slate-500 font-medium bg-transparent border-none focus:ring-2 focus:ring-emerald-500/20 rounded-lg px-2 py-1 cursor-pointer"
+                              />
+                            ) : (
+                              <span 
+                                onClick={() => setEditingDueDateTaskId(task.id)}
+                                className="text-xs text-slate-400 hover:text-emerald-600 font-medium cursor-pointer px-2 py-1 select-none"
+                              >
+                                —
+                              </span>
+                            )}
                           </td>
                           <td className="px-6 py-4 text-xs text-slate-500 font-bold whitespace-nowrap">
                             {(() => {
@@ -2819,579 +3497,8 @@ export default function App() {
                             )}
                           </div>
 
-                          <div className="space-y-3">
-                            <AnimatePresence mode="popLayout">
-                              {sectionTasks.map((task) => (
-                                <motion.div
-                                  layout
-                                  initial={{ opacity: 0, y: 10 }}
-                                  animate={{ opacity: 1, y: 0 }}
-                                  exit={{ opacity: 0, scale: 0.95 }}
-                                  key={task.id}
-                                  className={`group bg-white border border-slate-200 rounded-2xl p-4 flex flex-col gap-4 hover:shadow-md hover:border-emerald-100 transition-all ${task.status === 'completed' ? 'opacity-60' : ''}`}
-                                >
-                                  {editingTaskId === task.id ? (
-                                    <div className="space-y-4">
-                                      <input
-                                        autoFocus
-                                        type="text"
-                                        value={editingTaskTitle}
-                                        onChange={(e) => setEditingTaskTitle(e.target.value)}
-                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-emerald-500"
-                                      />
-                                      <div className="flex flex-wrap gap-4">
-                                        <div className="flex items-center gap-2">
-                                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Priority</label>
-                                          <select 
-                                            value={editingTaskPriority}
-                                            onChange={(e) => setEditingTaskPriority(e.target.value as Task['priority'])}
-                                            className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500"
-                                          >
-                                            <option value="low">Low</option>
-                                            <option value="moderate">Moderate</option>
-                                            <option value="high">High</option>
-                                            <option value="urgent">Urgent</option>
-                                          </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Due Date</label>
-                                          <input 
-                                            type="date"
-                                            value={editingTaskDueDate}
-                                            onChange={(e) => setEditingTaskDueDate(e.target.value)}
-                                            className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500"
-                                          />
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Key Result</label>
-                                          <input 
-                                            type="text"
-                                            value={editingTaskKeyResult}
-                                            onChange={(e) => setEditingTaskKeyResult(e.target.value)}
-                                            className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500 w-48"
-                                          />
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Project</label>
-                                          {(() => {
-                                            const pForOrg = projects.find(proj => task.project_ids.includes(proj.id));
-                                            const tForOrg = teams.find(team => team.id === pForOrg?.team_id);
-                                            const tOrgId = task.organization_id || tForOrg?.organization_id;
-                                            const tTeamId = task.team_id || pForOrg?.team_id;
-
-                                            return (
-                                              <select 
-                                                multiple
-                                                value={editingTaskProjectIds.map(String)}
-                                                onChange={(e) => setEditingTaskProjectIds(Array.from(e.target.selectedOptions).map((o: any) => Number(o.value)))}
-                                                className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500 min-w-32"
-                                              >
-                                                {projects.filter(p => {
-                                                  if (tTeamId) {
-                                                    return p.team_id === Number(tTeamId);
-                                                  }
-                                                  if (tOrgId) {
-                                                    const team = teams.find(t => t.id === p.team_id);
-                                                    return team?.organization_id === Number(tOrgId);
-                                                  }
-                                                  return p.team_id === (selectedTeam?.id || p.team_id);
-                                                }).map(p => (
-                                                  <option key={p.id} value={p.id}>{p.name}</option>
-                                                ))}
-                                              </select>
-                                            );
-                                          })()}
-                                        </div>
-                                      </div>
-                                      <div className="flex gap-2">
-                                        <button onClick={() => updateTaskDetails(task.id, { title: editingTaskTitle, priority: editingTaskPriority, due_date: editingTaskDueDate, key_result: editingTaskKeyResult, project_ids: editingTaskProjectIds })} className="bg-emerald-600 text-white px-4 py-1.5 rounded-lg text-xs font-bold">Update</button>
-                                        <button onClick={() => setEditingTaskId(null)} className="text-slate-400 px-4 py-1.5 text-xs font-bold">Cancel</button>
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <>
-                                      <div className="flex items-center gap-4">
-                                        <button 
-                                          onClick={() => updateTaskStatus(task.id, task.status === 'completed' ? 'pending' : 'completed')}
-                                          className={`transition-colors ${task.status === 'completed' ? 'text-emerald-500' : 'text-slate-300 hover:text-emerald-500'}`}
-                                        >
-                                          {task.status === 'completed' ? <CheckCircle2 size={24} /> : <Circle size={24} />}
-                                        </button>
-                                        
-                                        <div className="flex-grow">
-                                          <h4 className={`font-bold transition-all ${task.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-800'}`}>
-                                            {task.title}
-                                          </h4>
-                                          <div className="flex items-center gap-4 mt-1">
-                                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wider ${getPriorityColor(task.priority)}`}>
-                                              {task.priority}
-                                            </span>
-                                            {task.due_date && (
-                                              <div className="flex items-center gap-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                                                <Clock size={12} />
-                                                {new Date(task.due_date).toLocaleDateString()}
-                                              </div>
-                                            )}
-                                            {task.assignee_id && (
-                                              <div className="flex items-center gap-1.5 ml-auto border border-slate-100 bg-slate-50/50 rounded-xl px-2 py-0.5 shrink-0 transition-all">
-                                                {(() => {
-                                                  const u = users.find(usr => usr.id === task.assignee_id);
-                                                  if (!u) return null;
-                                                  const fullName = `${u.first_name} ${u.last_name || ''}`.trim();
-                                                  return (
-                                                    <>
-                                                      <img 
-                                                        src={u.avatar_url} 
-                                                        alt={fullName} 
-                                                        className="w-4 h-4 rounded-full ring-1 ring-slate-200"
-                                                        referrerPolicy="no-referrer"
-                                                      />
-                                                      <span className="text-[10px] font-semibold text-slate-500">{fullName}</span>
-                                                    </>
-                                                  );
-                                                })()}
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
-
-                                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                          <button 
-                                            onClick={() => {
-                                              setEditingTaskId(task.id);
-                                              setEditingTaskTitle(task.title);
-                                              setEditingTaskPriority(task.priority);
-                                              setEditingTaskDueDate(task.due_date || '');
-                                              setEditingTaskKeyResult(task.key_result || '');
-                                              setEditingTaskProjectIds(task.project_ids);
-                                            }}
-                                            className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-all"
-                                          >
-                                            <Edit2 size={16} />
-                                          </button>
-                                          <button 
-                                            onClick={() => deleteTask(task.id)}
-                                            className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
-                                          >
-                                            <Trash2 size={16} />
-                                          </button>
-                                          <button 
-                                            onClick={() => setExpandedTaskId(expandedTaskId === task.id ? null : task.id)}
-                                            className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-all"
-                                          >
-                                            {expandedTaskId === task.id ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                                          </button>
-                                        </div>
-                                      </div>
-
-                                      {/* Expanded Details */}
-                                      <AnimatePresence>
-                                        {expandedTaskId === task.id && (
-                                          <motion.div
-                                            initial={{ height: 0, opacity: 0 }}
-                                            animate={{ height: 'auto', opacity: 1 }}
-                                            exit={{ height: 0, opacity: 0 }}
-                                            className="overflow-hidden border-t border-slate-100 pt-4 space-y-6"
-                                          >
-                                            {/* Assignee */}
-                                            <div className="space-y-2">
-                                              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                                                <UserIcon size={12} /> Assignee
-                                              </h4>
-                                              <div className="pl-4">
-                                                <div className="flex items-center gap-2 max-w-xs bg-slate-50 border border-slate-200 rounded-xl p-1.5 focus-within:border-emerald-500 transition-all">
-                                                  {task.assignee_id && (
-                                                    <img 
-                                                      src={users.find(u => u.id === task.assignee_id)?.avatar_url} 
-                                                      alt="Avatar"
-                                                      className="w-5 h-5 rounded-full ml-1 shrink-0"
-                                                      referrerPolicy="no-referrer"
-                                                    />
-                                                  )}
-                                                  <select 
-                                                    value={task.assignee_id || ''}
-                                                    onChange={(e) => assignTaskToUser(task.id, e.target.value ? Number(e.target.value) : null)}
-                                                    className="bg-transparent border-none focus:ring-0 text-xs font-bold text-slate-700 cursor-pointer flex-grow py-1 focus:outline-none"
-                                                  >
-                                                    <option value="">Unassigned</option>
-                                                    {users.map(u => (
-                                                      <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
-                                                    ))}
-                                                  </select>
-                                                </div>
-                                              </div>
-                                            </div>
-
-                                            {/* Key Result */}
-                                            <div className="space-y-2">
-                                              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                                                <AlertCircle size={12} /> Key Result
-                                              </h4>
-                                              <div className="pl-4">
-                                                <input
-                                                  type="text"
-                                                  value={task.key_result || ''}
-                                                  onChange={(e) => updateTaskDetails(task.id, { key_result: e.target.value })}
-                                                  placeholder="What is the key result for this task?"
-                                                  className="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 focus:outline-none focus:border-emerald-500 transition-all"
-                                                />
-                                              </div>
-                                            </div>
-
-                                            {/* Projects Management */}
-                                            <div className="space-y-3">
-                                              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                                                <FolderKanban size={12} /> Projects & Sections
-                                              </h4>
-                                              <div className="space-y-3 pl-4">
-                                                {task.project_ids.map(pid => {
-                                                  const project = projects.find(p => p.id === pid);
-                                                  if (!project) return null;
-                                                  const projectSections = allSections.filter(s => Number(s.project_id) === Number(pid));
-                                                  const currentSectionId = task.section_assignments?.[pid];
-                                                  
-                                                  return (
-                                                    <div key={pid} className="flex flex-col gap-2 p-3 bg-slate-50 rounded-xl border border-slate-100">
-                                                      <div className="flex items-center justify-between">
-                                                        <div className="flex flex-col">
-                                                          <span className="text-xs font-bold text-slate-700">{project.name}</span>
-                                                          {(() => {
-                                                            const t = teams.find(team => team.id === project.team_id);
-                                                            return t ? <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{t.name}</span> : null;
-                                                          })()}
-                                                        </div>
-                                                        <button 
-                                                          onClick={() => {
-                                                            const newProjectIds = task.project_ids.filter(id => id !== pid);
-                                                            updateTaskDetails(task.id, { project_ids: newProjectIds });
-                                                          }}
-                                                          className="text-[10px] font-bold text-red-500 hover:text-red-600"
-                                                        >
-                                                          Remove
-                                                        </button>
-                                                      </div>
-                                                      <div className="flex items-center gap-2">
-                                                        <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Section:</label>
-                                                        <select 
-                                                          value={currentSectionId || ''}
-                                                          onChange={(e) => {
-                                                            const sid = e.target.value ? parseInt(e.target.value) : null;
-                                                            updateTaskDetails(task.id, { section_id: sid, current_project_id: pid } as any);
-                                                          }}
-                                                          className="bg-white border border-slate-200 rounded px-2 py-1 text-[10px] focus:outline-none focus:border-emerald-500 flex-grow"
-                                                        >
-                                                          <option value="">No Section</option>
-                                                          {projectSections.map(s => (
-                                                            <option key={s.id} value={s.id}>{s.name}</option>
-                                                          ))}
-                                                        </select>
-                                                      </div>
-                                                    </div>
-                                                  );
-                                                })}
-                                                
-                                                {/* Add to another project */}
-                                                <div className="flex items-center gap-2 mt-2">
-                                                  <Plus size={14} className="text-slate-300" />
-                                                  <select 
-                                                    value=""
-                                                    onChange={(e) => {
-                                                      const pid = parseInt(e.target.value);
-                                                      if (!task.project_ids.includes(pid)) {
-                                                        updateTaskDetails(task.id, { project_ids: [...task.project_ids, pid] });
-                                                      }
-                                                    }}
-                                                    className="text-[10px] bg-transparent border-none focus:ring-0 text-slate-500 font-medium cursor-pointer w-full"
-                                                  >
-                                                    <option value="" disabled>Add to project...</option>
-                                                    {(() => {
-                                                      const pForOrg = projects.find(proj => task.project_ids.includes(proj.id));
-                                                      const tForOrg = teams.find(team => team.id === pForOrg?.team_id);
-                                                      const taskOrgId = task.organization_id || tForOrg?.organization_id || '';
-                                                      const taskTeamId = task.team_id || pForOrg?.team_id || '';
-
-                                                      return teams
-                                                        .filter(t => {
-                                                          if (taskTeamId) {
-                                                            return t.id === Number(taskTeamId);
-                                                          }
-                                                          if (taskOrgId) {
-                                                            return t.organization_id === Number(taskOrgId);
-                                                          }
-                                                          return !selectedOrganization || t.organization_id === selectedOrganization.id;
-                                                        })
-                                                        .map(team => {
-                                                          const teamProjects = projects.filter(p => p.team_id === team.id && !task.project_ids.includes(p.id));
-                                                          if (teamProjects.length === 0) return null;
-                                                          const orgName = organizations.find(o => o.id === team.organization_id)?.name || 'Unassigned';
-                                                          return (
-                                                            <optgroup key={team.id} label={`${team.name} ${!taskOrgId ? `(${orgName})` : ''}`}>
-                                                              {teamProjects.map(p => (
-                                                                <option key={p.id} value={p.id}>{p.name}</option>
-                                                              ))}
-                                                            </optgroup>
-                                                          );
-                                                        });
-                                                    })()}
-                                                  </select>
-                                                </div>
-                                              </div>
-                                            </div>
-
-                                            {/* Subtasks */}
-                                            <div className="space-y-3">
-                                              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                                                <CheckCircle2 size={12} /> Subtasks
-                                              </h4>
-                                              <div className="space-y-2 pl-4">
-                                                {task.subtasks?.map(st => (
-                                                  <div key={st.id} className="space-y-1">
-                                                    <div className="flex items-center gap-3 group/st">
-                                                      <button onClick={() => toggleSubtask(st)} className={st.status === 'completed' ? 'text-emerald-500' : 'text-slate-300'}>
-                                                        {st.status === 'completed' ? <CheckCircle2 size={16} /> : <Circle size={16} />}
-                                                      </button>
-                                                      {editingSubtaskId === st.id ? (
-                                                        <div className="flex-grow flex items-center gap-2">
-                                                          <input
-                                                            autoFocus
-                                                            type="text"
-                                                            value={editingSubtaskTitle}
-                                                            onChange={(e) => setEditingSubtaskTitle(e.target.value)}
-                                                            className="text-sm bg-slate-50 border border-slate-200 rounded px-2 py-0.5 focus:outline-none focus:border-emerald-500 flex-grow"
-                                                            onKeyDown={(e) => e.key === 'Enter' && updateSubtask(st.id, editingSubtaskTitle)}
-                                                          />
-                                                          <button onClick={() => updateSubtask(st.id, editingSubtaskTitle)} className="text-[10px] font-bold text-emerald-600">Save</button>
-                                                          <button onClick={() => setEditingSubtaskId(null)} className="text-[10px] font-bold text-slate-400">Cancel</button>
-                                                        </div>
-                                                      ) : (
-                                                        <>
-                                                          <span className={`text-sm flex-grow ${st.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-600'}`}>
-                                                            {st.title}
-                                                          </span>
-                                                          <div className="flex items-center gap-1 opacity-0 group-hover/st:opacity-100 transition-opacity">
-                                                            <button 
-                                                              onClick={() => {
-                                                                setEditingSubtaskId(st.id);
-                                                                setEditingSubtaskTitle(st.title);
-                                                              }}
-                                                              className="p-1 text-slate-400 hover:text-emerald-600"
-                                                            >
-                                                              <Edit2 size={12} />
-                                                            </button>
-                                                            <button 
-                                                              onClick={() => deleteSubtask(st.id)}
-                                                              className="p-1 text-slate-400 hover:text-red-500"
-                                                            >
-                                                              <Trash2 size={12} />
-                                                            </button>
-                                                          </div>
-                                                        </>
-                                                      )}
-                                                    </div>
-                                                    
-                                                    {/* Subtask Comments */}
-                                                    {st.comments && st.comments.length > 0 && (
-                                                      <div className="mt-2 space-y-2 pl-6 border-l border-slate-100">
-                                                        {st.comments.map(comment => (
-                                                          <div key={comment.id} className="group/comment bg-slate-50/50 p-2 rounded-lg relative">
-                                                            <p className="text-xs text-slate-600">{comment.content}</p>
-                                                            {comment.attachment_url && (
-                                                              <a 
-                                                                href={comment.attachment_url} 
-                                                                target="_blank" 
-                                                                rel="noopener noreferrer"
-                                                                className="mt-1 flex items-center gap-1 text-[10px] text-emerald-600 hover:underline"
-                                                              >
-                                                                <Paperclip size={10} />
-                                                                {comment.attachment_name || 'Attachment'}
-                                                              </a>
-                                                            )}
-                                                            <div className="flex items-center justify-between mt-1">
-                                                              <span className="text-[9px] text-slate-400 font-medium">
-                                                                {new Date(comment.created_at).toLocaleString()}
-                                                              </span>
-                                                              <button 
-                                                                onClick={() => deleteComment(comment.id)}
-                                                                className="opacity-0 group-hover/comment:opacity-100 p-1 text-slate-300 hover:text-red-500 transition-opacity"
-                                                              >
-                                                                <Trash2 size={10} />
-                                                              </button>
-                                                            </div>
-                                                          </div>
-                                                        ))}
-                                                      </div>
-                                                    )}
-
-                                                    {/* Add Subtask Comment */}
-                                                    <div className="mt-2 pl-6">
-                                                      <div className="flex flex-col gap-2 bg-slate-50/30 p-2 rounded-lg border border-dashed border-slate-200">
-                                                        <textarea 
-                                                          placeholder="Add a progress log..." 
-                                                          value={newCommentContent}
-                                                          onChange={(e) => setNewCommentContent(e.target.value)}
-                                                          className="text-xs bg-transparent border-none focus:ring-0 placeholder:text-slate-300 resize-none h-12"
-                                                        />
-                                                        <div className="flex items-center gap-2">
-                                                          <input 
-                                                            type="text" 
-                                                            placeholder="Attach URL (optional)..." 
-                                                            value={newCommentAttachmentUrl}
-                                                            onChange={(e) => setNewCommentAttachmentUrl(e.target.value)}
-                                                            className="flex-grow text-[10px] bg-white border border-slate-200 rounded px-2 py-1 focus:outline-none focus:border-emerald-500"
-                                                          />
-                                                          <button 
-                                                            onClick={() => addComment(undefined, st.id)}
-                                                            className="bg-emerald-600 text-white px-3 py-1 rounded text-[10px] font-bold"
-                                                          >
-                                                            Log
-                                                          </button>
-                                                        </div>
-                                                      </div>
-                                                    </div>
-                                                  </div>
-                                                ))}
-                                                <div className="flex items-center gap-3">
-                                                  <Plus size={16} className="text-slate-300" />
-                                                  <input 
-                                                    type="text" 
-                                                    placeholder="Add subtask..." 
-                                                    value={newSubtaskTitle}
-                                                    onChange={(e) => setNewSubtaskTitle(e.target.value)}
-                                                    className="text-sm bg-transparent border-none focus:ring-0 placeholder:text-slate-300 flex-grow"
-                                                    onKeyDown={(e) => e.key === 'Enter' && addSubtask(task.id)}
-                                                  />
-                                                </div>
-                                              </div>
-                                            </div>
-
-                                            {/* Attachments */}
-                                            <div className="space-y-3">
-                                              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                                                <Paperclip size={12} /> Attachments
-                                              </h4>
-                                              <div className="space-y-2 pl-4">
-                                                {task.attachments?.map(at => (
-                                                  <div key={at.id} className="group/at flex items-center gap-2">
-                                                    <a 
-                                                      href={at.url} 
-                                                      target="_blank" 
-                                                      rel="noopener noreferrer"
-                                                      className="flex items-center gap-2 text-sm text-emerald-600 hover:underline"
-                                                    >
-                                                      <FolderKanban size={14} />
-                                                      {at.name}
-                                                    </a>
-                                                    <button 
-                                                      onClick={() => deleteAttachment(at.id)}
-                                                      className="opacity-0 group-hover/at:opacity-100 p-1 text-slate-300 hover:text-red-500 transition-opacity"
-                                                    >
-                                                      <Trash2 size={14} />
-                                                    </button>
-                                                  </div>
-                                                ))}
-                                                <div className="flex flex-col gap-2 bg-slate-50 p-3 rounded-xl border border-slate-100">
-                                                  <input 
-                                                    type="text" 
-                                                    placeholder="File name..." 
-                                                    value={newAttachmentName}
-                                                    onChange={(e) => setNewAttachmentName(e.target.value)}
-                                                    className="text-xs bg-white border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
-                                                  />
-                                                  <div className="flex gap-2">
-                                                    <input 
-                                                      type="text" 
-                                                      placeholder="URL..." 
-                                                      value={newAttachmentUrl}
-                                                      onChange={(e) => setNewAttachmentUrl(e.target.value)}
-                                                      className="flex-grow text-xs bg-white border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
-                                                    />
-                                                    <button 
-                                                      onClick={() => addAttachment(task.id)}
-                                                      className="bg-emerald-600 text-white px-4 py-2 rounded-lg text-[10px] font-bold"
-                                                    >
-                                                      Add
-                                                    </button>
-                                                  </div>
-                                                </div>
-                                              </div>
-                                            </div>
-
-                                            {/* Task Comments */}
-                                            <div className="space-y-3">
-                                              <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                                                <Terminal size={12} /> Progress Logs
-                                              </h4>
-                                              <div className="space-y-3 pl-4">
-                                                {task.comments?.map(comment => (
-                                                  <div key={comment.id} className="group/comment bg-slate-50 p-3 rounded-xl border border-slate-100 relative">
-                                                    <p className="text-sm text-slate-700 leading-relaxed">{comment.content}</p>
-                                                    {comment.attachment_url && (
-                                                      <a 
-                                                        href={comment.attachment_url} 
-                                                        target="_blank" 
-                                                        rel="noopener noreferrer"
-                                                        className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-emerald-600 hover:bg-emerald-50 transition-colors"
-                                                      >
-                                                        <Paperclip size={12} />
-                                                        {comment.attachment_name || 'View Attachment'}
-                                                      </a>
-                                                    )}
-                                                    <div className="flex items-center justify-between mt-3 pt-2 border-t border-slate-100">
-                                                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
-                                                        {new Date(comment.created_at).toLocaleString()}
-                                                      </span>
-                                                      <button 
-                                                        onClick={() => deleteComment(comment.id)}
-                                                        className="opacity-0 group-hover/comment:opacity-100 p-1.5 text-slate-300 hover:text-red-500 transition-all"
-                                                      >
-                                                        <Trash2 size={14} />
-                                                      </button>
-                                                    </div>
-                                                  </div>
-                                                ))}
-
-                                                <div className="bg-white border border-dashed border-slate-200 rounded-2xl p-4 space-y-3">
-                                                  <textarea 
-                                                    placeholder="Log your progress on this task..." 
-                                                    value={newCommentContent}
-                                                    onChange={(e) => setNewCommentContent(e.target.value)}
-                                                    className="w-full text-sm bg-slate-50 border border-slate-100 rounded-xl px-4 py-3 focus:outline-none focus:border-emerald-500 resize-none h-24"
-                                                  />
-                                                  <div className="flex gap-3">
-                                                    <div className="flex-grow grid grid-cols-2 gap-2">
-                                                      <input 
-                                                        type="text" 
-                                                        placeholder="Attachment Name (e.g. Screenshot)" 
-                                                        value={newCommentAttachmentName}
-                                                        onChange={(e) => setNewCommentAttachmentName(e.target.value)}
-                                                        className="text-xs bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
-                                                      />
-                                                      <input 
-                                                        type="text" 
-                                                        placeholder="Attachment URL" 
-                                                        value={newCommentAttachmentUrl}
-                                                        onChange={(e) => setNewCommentAttachmentUrl(e.target.value)}
-                                                        className="text-xs bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
-                                                      />
-                                                    </div>
-                                                    <button 
-                                                      onClick={() => addComment(task.id)}
-                                                      className="px-6 py-2 bg-emerald-600 text-white text-xs font-bold rounded-xl hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-100"
-                                                    >
-                                                      Add Log
-                                                    </button>
-                                                  </div>
-                                                </div>
-                                              </div>
-                                            </div>
-                                          </motion.div>
-                                        )}
-                                      </AnimatePresence>
-                                    </>
-                                  )}
-                                </motion.div>
-                              ))}
-                            </AnimatePresence>
+                          <div className="mt-4">
+                            {renderSectionTasksTable(sectionTasks)}
                           </div>
                         </div>
                       );
@@ -3835,16 +3942,16 @@ export default function App() {
                                   let colorClasses = '';
                                   if (s.scope_type === 'organization') {
                                     scopeLabel = `Org: ${organizations.find(o => o.id === s.scope_id)?.name || s.scope_id}`;
-                                    colorClasses = 'bg-slate-100 text-slate-705 border-slate-200';
+                                    colorClasses = 'bg-slate-100 text-slate-700 border-slate-200';
                                   } else if (s.scope_type === 'division') {
                                     scopeLabel = `Div: ${divisions.find(d => d.id === s.scope_id)?.name || s.scope_id}`;
-                                    colorClasses = 'bg-teal-50 text-teal-705 border-teal-200';
+                                    colorClasses = 'bg-teal-50 text-teal-700 border-teal-200';
                                   } else if (s.scope_type === 'team') {
                                     scopeLabel = `Team: ${teams.find(t => t.id === s.scope_id)?.name || s.scope_id}`;
-                                    colorClasses = 'bg-blue-50 text-blue-705 border-blue-200';
+                                    colorClasses = 'bg-blue-50 text-blue-700 border-blue-200';
                                   } else if (s.scope_type === 'project') {
                                     scopeLabel = `Proj: ${projects.find(p => p.id === s.scope_id)?.name || s.scope_id}`;
-                                    colorClasses = 'bg-amber-50 text-amber-705 border-amber-200';
+                                    colorClasses = 'bg-amber-50 text-amber-700 border-amber-200';
                                   }
 
                                   // Can the current user delete this scope?
@@ -3882,85 +3989,78 @@ export default function App() {
                             </div>
 
                             {/* Assign new scope UI if authorized */}
-                            {(currentUser?.user_type.includes('Super Admin') || currentUser?.user_type.includes('Admin')) && (
-                              <div className="bg-slate-50 border border-slate-100 p-3 rounded-2xl space-y-2 mt-3">
-                                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest text-[9px] leading-tight">Grant New Scope</p>
-                                <div className="grid grid-cols-2 gap-2">
-                                  {/* Scope Type Selector */}
-                                  <select 
-                                    className="bg-white border border-slate-200 text-[11px] rounded-xl px-2 py-1 font-semibold focus:outline-none"
-                                    id={`new-scope-type-${user.id}`}
-                                    onChange={() => fetchData()}
-                                  >
-                                    <option value="organization">Organization</option>
-                                    <option value="division">Division</option>
-                                    <option value="team">Team</option>
-                                    <option value="project">Project</option>
-                                  </select>
+                            {(currentUser?.user_type.includes('Super Admin') || currentUser?.user_type.includes('Admin')) && (() => {
+                              const selectedType = userScopeType[user.id] || 'organization';
+                              return (
+                                <div className="bg-slate-50 border border-slate-100 p-3 rounded-2xl space-y-2 mt-3 text-left">
+                                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest text-[9px] leading-tight">Grant New Scope</p>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    {/* Scope Type Selector */}
+                                    <select 
+                                      className="bg-white border border-slate-200 text-[11px] rounded-xl px-2.5 py-1.5 font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                                      value={selectedType}
+                                      onChange={(e) => {
+                                        const val = e.target.value as 'organization' | 'division' | 'team' | 'project';
+                                        setUserScopeType(prev => ({ ...prev, [user.id]: val }));
+                                      }}
+                                    >
+                                      <option value="organization">Organization</option>
+                                      <option value="division">Division</option>
+                                      <option value="team">Team</option>
+                                      <option value="project">Project</option>
+                                    </select>
 
-                                  {/* Scope ID Selector */}
-                                  <select 
-                                    className="bg-white border border-slate-200 text-[11px] rounded-xl px-2 py-1 font-semibold focus:outline-none"
-                                    id={`new-scope-id-${user.id}`}
-                                  >
-                                    <option value="">-- Choose --</option>
-                                    {/* Organizations */}
-                                    {organizations.filter(o => {
-                                      return currentUser.user_type.includes('Super Admin') || canManageOrganization(o.id);
-                                    }).map(o => (
-                                      <option key={o.id} value={o.id}>Org: {o.name}</option>
-                                    ))}
-                                    {/* Divisions */}
-                                    {divisions.filter(d => {
-                                      return currentUser.user_type.includes('Super Admin') || canManageOrganization(d.organization_id);
-                                    }).map(d => (
-                                      <option key={d.id} value={d.id}>Div: {d.name}</option>
-                                    ))}
-                                    {/* Teams */}
-                                    {teams.filter(t => {
-                                      return currentUser.user_type.includes('Super Admin') || canManageOrganization(t.organization_id);
-                                    }).map(t => (
-                                      <option key={t.id} value={t.id}>Team: {t.name}</option>
-                                    ))}
-                                    {/* Projects */}
-                                    {projects.filter(p => {
-                                      const associatedOrg = getOrganizationOfProject(p.id);
-                                      return currentUser.user_type.includes('Super Admin') || (associatedOrg && canManageOrganization(associatedOrg));
-                                    }).map(p => (
-                                      <option key={p.id} value={p.id}>Proj: {p.name}</option>
-                                    ))}
-                                  </select>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const typeSel = document.getElementById(`new-scope-type-${user.id}`) as HTMLSelectElement;
-                                    const idSel = document.getElementById(`new-scope-id-${user.id}`) as HTMLSelectElement;
-                                    if (typeSel && idSel && idSel.value) {
-                                      const sType = typeSel.value as 'organization' | 'division' | 'team' | 'project';
-                                      const sId = Number(idSel.value);
+                                    {/* Scope ID Selector */}
+                                    <select 
+                                      className="bg-white border border-slate-200 text-[11px] rounded-xl px-2.5 py-1.5 font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                                      id={`new-scope-id-${user.id}`}
+                                    >
+                                      <option value="">-- Choose {selectedType.charAt(0).toUpperCase() + selectedType.slice(1)} --</option>
+                                      {selectedType === 'organization' && organizations.filter(o => {
+                                        return currentUser.user_type.includes('Super Admin') || canManageOrganization(o.id);
+                                      }).map(o => (
+                                        <option key={o.id} value={o.id}>{o.name}</option>
+                                      ))}
                                       
-                                      const isOrg = sType === 'organization' && organizations.some(o => o.id === sId);
-                                      const isDiv = sType === 'division' && divisions.some(d => d.id === sId);
-                                      const isTeam = sType === 'team' && teams.some(t => t.id === sId);
-                                      const isProj = sType === 'project' && projects.some(p => p.id === sId);
+                                      {selectedType === 'division' && divisions.filter(d => {
+                                        return currentUser.user_type.includes('Super Admin') || canManageOrganization(d.organization_id);
+                                      }).map(d => (
+                                        <option key={d.id} value={d.id}>{d.name} ({organizations.find(o => o.id === d.organization_id)?.name})</option>
+                                      ))}
                                       
-                                      if (isOrg || isDiv || isTeam || isProj) {
-                                        addScope(user.id, sType, sId);
+                                      {selectedType === 'team' && teams.filter(t => {
+                                        return currentUser.user_type.includes('Super Admin') || canManageOrganization(t.organization_id);
+                                      }).map(t => (
+                                        <option key={t.id} value={t.id}>{t.name} ({organizations.find(o => o.id === t.organization_id)?.name})</option>
+                                      ))}
+                                      
+                                      {selectedType === 'project' && projects.filter(p => {
+                                        const associatedOrg = getOrganizationOfProject(p.id);
+                                        return currentUser.user_type.includes('Super Admin') || (associatedOrg && canManageOrganization(associatedOrg));
+                                      }).map(p => (
+                                        <option key={p.id} value={p.id}>{p.name} ({teams.find(t => t.id === p.team_id)?.name})</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const idSel = document.getElementById(`new-scope-id-${user.id}`) as HTMLSelectElement;
+                                      if (idSel && idSel.value) {
+                                        const sId = Number(idSel.value);
+                                        addScope(user.id, selectedType, sId);
                                         idSel.value = "";
                                       } else {
-                                        alert("Please select a target matching the selected Area Type!");
+                                        alert(`Please choose a ${selectedType} to assign!`);
                                       }
-                                    } else {
-                                      alert("Please choose a target to assign!");
-                                    }
-                                  }}
-                                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] py-1.5 rounded-xl transition-all uppercase tracking-wider"
-                                >
-                                  + Grant Scope
-                                </button>
-                              </div>
-                            )}
+                                    }}
+                                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] py-2 rounded-xl transition-all uppercase tracking-wider"
+                                  >
+                                    + Grant Scope
+                                  </button>
+                                </div>
+                              );
+                            })()}
                           </div>
                         )}
                       </div>
