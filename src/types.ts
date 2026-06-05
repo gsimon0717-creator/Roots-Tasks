@@ -51,9 +51,19 @@ export interface User {
   last_name?: string;
   email: string;
   phone?: string;
+  password?: string;
+  google_id?: string;
   avatar_url?: string;
   is_di: boolean;
   user_type: 'Human Super Admin' | 'DI Super Admin' | 'Human Admin' | 'DI Admin' | 'Human User' | 'DI User';
+  api_key?: string;
+}
+
+export interface UserScope {
+  id: number;
+  user_id: number;
+  scope_type: 'organization' | 'division' | 'team' | 'project';
+  scope_id: number;
 }
 
 export interface Task {

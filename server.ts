@@ -51,9 +51,12 @@ db.exec(`
     last_name TEXT,
     email TEXT UNIQUE NOT NULL,
     phone TEXT,
+    password TEXT DEFAULT 'password',
+    google_id TEXT,
     avatar_url TEXT,
     is_di BOOLEAN DEFAULT 0,
     user_type TEXT NOT NULL,
+    api_key TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -196,6 +199,48 @@ try {
   db.prepare("ALTER TABLE tasks ADD COLUMN division_id INTEGER REFERENCES divisions(id) ON DELETE SET NULL").run();
 } catch (e: any) {}
 
+// Migration: Add password and google_id to users table if they do not exist
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN password TEXT DEFAULT 'password'").run();
+} catch (e: any) {}
+
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN google_id TEXT").run();
+} catch (e: any) {}
+
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN api_key TEXT").run();
+} catch (e: any) {}
+
+// Populate API keys for existing DI users if empty
+try {
+  const diUsersWithoutApiKey = db.prepare("SELECT id, name FROM users WHERE is_di = 1 AND (api_key IS NULL OR api_key = '')").all() as any[];
+  const updateKeyStmt = db.prepare("UPDATE users SET api_key = ? WHERE id = ?");
+  for (const u of diUsersWithoutApiKey) {
+    const randomHex = Math.random().toString(16).substring(2, 10);
+    const generatedKey = `roots_di_${randomHex}`;
+    updateKeyStmt.run(generatedKey, u.id);
+    console.log(`Generated default API Key for DI User ${u.name}`);
+  }
+} catch (e: any) {
+  console.error("Failed to populate default API keys:", e);
+}
+
+// Migration: Add user_scopes table
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_scopes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      scope_type TEXT NOT NULL, -- 'organization', 'division', 'team', 'project'
+      scope_id INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+  `);
+} catch (e: any) {
+  console.error("Migration/Setup of user_scopes table failed:", e);
+}
+
 // Seed default data if empty
 const orgCount = db.prepare("SELECT COUNT(*) as count FROM organizations").get() as { count: number };
 let defaultOrgId: any;
@@ -221,10 +266,11 @@ if (userCount.count === 0) {
     { first_name: "DI Assistant", last_name: "", email: "assistant@di.com", is_di: 1, user_type: "DI Super Admin", avatar_url: "https://api.dicebear.com/7.x/bottts/svg?seed=DI" },
     { first_name: "Jane", last_name: "Smith", email: "jane@example.com", is_di: 0, user_type: "Human Admin", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=Jane" }
   ];
-  const stmt = db.prepare("INSERT INTO users (name, first_name, last_name, email, is_di, user_type, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  const stmt = db.prepare("INSERT INTO users (name, first_name, last_name, email, is_di, user_type, avatar_url, api_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
   for (const user of users) {
     const name = user.last_name ? `${user.first_name} ${user.last_name}` : user.first_name;
-    stmt.run(name, user.first_name, user.last_name || null, user.email, user.is_di, user.user_type, user.avatar_url);
+    const generatedKey = user.is_di ? `roots_di_${Math.random().toString(16).substring(2, 10)}` : null;
+    stmt.run(name, user.first_name, user.last_name || null, user.email, user.is_di, user.user_type, user.avatar_url, generatedKey);
   }
 }
 
@@ -297,6 +343,40 @@ async function startServer() {
 
   const apiRouter = express.Router();
 
+  // API Key & Programmatic Agent Authentication Middleware
+  apiRouter.use((req, res, next) => {
+    let apiKey: string | undefined = undefined;
+
+    // Check X-API-Key header
+    if (req.headers["x-api-key"]) {
+      apiKey = req.headers["x-api-key"] as string;
+    } 
+    // Check Authorization Bearer header
+    else if (req.headers["authorization"]) {
+      const authHeader = req.headers["authorization"] as string;
+      if (authHeader.toLowerCase().startsWith("bearer ")) {
+        apiKey = authHeader.substring(7).trim();
+      }
+    }
+
+    if (apiKey) {
+      try {
+        const authenticatedUser = db.prepare("SELECT * FROM users WHERE api_key = ?").get(apiKey) as any;
+        if (authenticatedUser) {
+          // Attach authenticated user details to the request
+          (req as any).user = authenticatedUser;
+          console.log(`[API Auth] Programmatic Agent Access: ${authenticatedUser.name} (${authenticatedUser.user_type}) authenticated successfully via API Key.`);
+        } else {
+          return res.status(401).json({ error: "Invalid API Key provided" });
+        }
+      } catch (e: any) {
+        console.error("API Auth error:", e);
+      }
+    }
+
+    next();
+  });
+
   apiRouter.get("/health", (req, res) => {
     res.json({
       status: "ok",
@@ -331,7 +411,7 @@ async function startServer() {
   });
 
   apiRouter.post("/users", (req, res) => {
-    const { first_name, last_name, email, phone, is_di, user_type } = req.body;
+    const { first_name, last_name, email, phone, is_di, user_type, password } = req.body;
     if (!first_name || !email || !user_type) {
       return res.status(400).json({ error: "First name, email, and user type are required" });
     }
@@ -340,10 +420,12 @@ async function startServer() {
       : `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name}`;
     
     const name = last_name ? `${first_name} ${last_name}` : first_name;
+    const finalPassword = password || 'password';
+    const generatedKey = is_di ? `roots_di_${Math.random().toString(16).substring(2, 10)}` : null;
     
     try {
-      const info = db.prepare("INSERT INTO users (name, first_name, last_name, email, phone, is_di, user_type, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(name, first_name, last_name || null, email, phone || null, is_di ? 1 : 0, user_type, avatar_url);
+      const info = db.prepare("INSERT INTO users (name, first_name, last_name, email, phone, is_di, user_type, avatar_url, password, api_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(name, first_name, last_name || null, email, phone || null, is_di ? 1 : 0, user_type, avatar_url, finalPassword, generatedKey);
       res.status(201).json(db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid));
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -352,7 +434,7 @@ async function startServer() {
 
   apiRouter.patch("/users/:id", (req, res) => {
     const { id } = req.params;
-    const { first_name, last_name, email, phone, is_di, user_type } = req.body;
+    const { first_name, last_name, email, phone, is_di, user_type, password, api_key, regenerate_api_key } = req.body;
     
     const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id) as any;
     if (!user) {
@@ -368,6 +450,27 @@ async function startServer() {
     if (phone !== undefined) { updates.push("phone = ?"); values.push(phone || null); }
     if (is_di !== undefined) { updates.push("is_di = ?"); values.push(is_di ? 1 : 0); }
     if (user_type !== undefined) { updates.push("user_type = ?"); values.push(user_type); }
+    if (password !== undefined) { updates.push("password = ?"); values.push(password); }
+
+    // API Key rotation/generation logic
+    let targetIsDi = is_di !== undefined ? (is_di ? 1 : 0) : user.is_di;
+    if (regenerate_api_key) {
+      const rotatedKey = `roots_di_${Math.random().toString(16).substring(2, 10)}`;
+      updates.push("api_key = ?");
+      values.push(rotatedKey);
+    } else if (api_key !== undefined) {
+      updates.push("api_key = ?");
+      values.push(api_key || null);
+    } else if (targetIsDi && (!user.api_key || user.api_key === "")) {
+      // Auto-generate key if newly becoming a DI user or if they list DI but lack a key
+      const newKey = `roots_di_${Math.random().toString(16).substring(2, 10)}`;
+      updates.push("api_key = ?");
+      values.push(newKey);
+    } else if (!targetIsDi && user.api_key) {
+      // Clear key if turning into non-DI user
+      updates.push("api_key = ?");
+      values.push(null);
+    }
 
     if (first_name !== undefined || last_name !== undefined) {
       const updatedFirstName = first_name !== undefined ? first_name : user.first_name;
@@ -409,6 +512,97 @@ async function startServer() {
         return res.status(404).json({ error: "User not found" });
       }
       res.status(204).send();
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Auth APIs
+  apiRouter.post("/auth/login", (req, res) => {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
+    const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
+    if (!user) {
+      return res.status(400).json({ error: "Invalid email or password" });
+    }
+    if (user.password !== password) {
+      return res.status(400).json({ error: "Invalid email or password" });
+    }
+    res.json(user);
+  });
+
+  apiRouter.post("/auth/google-sso", (req, res) => {
+    const { email, first_name, last_name, google_id } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    let user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
+    if (!user) {
+      // Create user
+      const uType = 'Human User';
+      const isDI = 0;
+      const avatar_url = `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name || 'Google'}`;
+      const name = last_name ? `${first_name} ${last_name}` : (first_name || email.split('@')[0]);
+
+      const info = db.prepare("INSERT INTO users (name, first_name, last_name, email, is_di, user_type, avatar_url, google_id, password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(name, first_name || email.split('@')[0], last_name || null, email, isDI, uType, avatar_url, google_id || 'google_sso_simulated', 'password');
+      user = db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid);
+    } else {
+      if (!user.google_id && google_id) {
+        db.prepare("UPDATE users SET google_id = ? WHERE id = ?").run(google_id, user.id);
+        user.google_id = google_id;
+      }
+    }
+    res.json(user);
+  });
+
+  // User Scopes APIs
+  apiRouter.get("/user_scopes", (req, res) => {
+    try {
+      const scopes = db.prepare("SELECT * FROM user_scopes").all();
+      res.json(scopes);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  apiRouter.post("/user_scopes", (req, res) => {
+    const { user_id, scope_type, scope_id } = req.body;
+    if (!user_id || !scope_type || !scope_id) {
+      return res.status(400).json({ error: "user_id, scope_type, and scope_id are required" });
+    }
+
+    try {
+      const exists = db.prepare("SELECT id FROM user_scopes WHERE user_id = ? AND scope_type = ? AND scope_id = ?")
+        .get(user_id, scope_type, scope_id);
+      if (exists) {
+        return res.status(400).json({ error: "Scope assignment already exists" });
+      }
+
+      const info = db.prepare("INSERT INTO user_scopes (user_id, scope_type, scope_id) VALUES (?, ?, ?)")
+        .run(user_id, scope_type, scope_id);
+      res.status(201).json({ id: info.lastInsertRowid, user_id, scope_type, scope_id });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  apiRouter.delete("/user_scopes", (req, res) => {
+    const { user_id, scope_type, scope_id } = req.body;
+    if (!user_id || !scope_type || !scope_id) {
+      return res.status(400).json({ error: "user_id, scope_type, and scope_id are required" });
+    }
+
+    try {
+      const result = db.prepare("DELETE FROM user_scopes WHERE user_id = ? AND scope_type = ? AND scope_id = ?")
+        .run(user_id, scope_type, scope_id);
+      if (result.changes === 0) {
+        return res.status(404).json({ error: "Scope assignment not found" });
+      }
+      res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
