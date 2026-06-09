@@ -50,6 +50,7 @@ db.exec(`
     first_name TEXT NOT NULL,
     last_name TEXT,
     email TEXT UNIQUE NOT NULL,
+    username TEXT UNIQUE,
     phone TEXT,
     password TEXT DEFAULT 'password',
     google_id TEXT,
@@ -211,6 +212,33 @@ try {
 try {
   db.prepare("ALTER TABLE users ADD COLUMN api_key TEXT").run();
 } catch (e: any) {}
+
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN username TEXT").run();
+} catch (e: any) {}
+
+// Populate usernames for existing users if empty
+try {
+  const usersWithoutUsername = db.prepare("SELECT id, email FROM users WHERE username IS NULL OR username = ''").all() as any[];
+  const updateUsernameStmt = db.prepare("UPDATE users SET username = ? WHERE id = ?");
+  for (const u of usersWithoutUsername) {
+    let baseUsername = u.email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (!baseUsername) baseUsername = `user_${u.id}`;
+    // Ensure uniqueness if same base exists
+    let currentUsername = baseUsername;
+    let counter = 1;
+    while (true) {
+      const collision = db.prepare("SELECT id FROM users WHERE username = ? AND id != ?").get(currentUsername, u.id);
+      if (!collision) break;
+      currentUsername = `${baseUsername}${counter}`;
+      counter++;
+    }
+    updateUsernameStmt.run(currentUsername, u.id);
+    console.log(`Generated default username @${currentUsername} for User ID ${u.id}`);
+  }
+} catch (e: any) {
+  console.error("Migration: Failed to populate usernames for existing users:", e);
+}
 
 // Populate API keys for existing DI users if empty
 try {
@@ -411,7 +439,7 @@ async function startServer() {
   });
 
   apiRouter.post("/users", (req, res) => {
-    const { first_name, last_name, email, phone, is_di, user_type, password } = req.body;
+    const { first_name, last_name, email, username, phone, is_di, user_type, password } = req.body;
     if (!first_name || !email || !user_type) {
       return res.status(400).json({ error: "First name, email, and user type are required" });
     }
@@ -421,11 +449,12 @@ async function startServer() {
     
     const name = last_name ? `${first_name} ${last_name}` : first_name;
     const finalPassword = password || 'password';
+    const finalUsername = (username || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9_]/g, '');
     const generatedKey = is_di ? `roots_di_${Math.random().toString(16).substring(2, 10)}` : null;
     
     try {
-      const info = db.prepare("INSERT INTO users (name, first_name, last_name, email, phone, is_di, user_type, avatar_url, password, api_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(name, first_name, last_name || null, email, phone || null, is_di ? 1 : 0, user_type, avatar_url, finalPassword, generatedKey);
+      const info = db.prepare("INSERT INTO users (name, first_name, last_name, email, username, phone, is_di, user_type, avatar_url, password, api_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(name, first_name, last_name || null, email, finalUsername, phone || null, is_di ? 1 : 0, user_type, avatar_url, finalPassword, generatedKey);
       res.status(201).json(db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid));
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -434,7 +463,7 @@ async function startServer() {
 
   apiRouter.patch("/users/:id", (req, res) => {
     const { id } = req.params;
-    const { first_name, last_name, email, phone, is_di, user_type, password, api_key, regenerate_api_key } = req.body;
+    const { first_name, last_name, email, username, phone, is_di, user_type, password, api_key, regenerate_api_key } = req.body;
     
     const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id) as any;
     if (!user) {
@@ -447,6 +476,7 @@ async function startServer() {
     if (first_name !== undefined) { updates.push("first_name = ?"); values.push(first_name); }
     if (last_name !== undefined) { updates.push("last_name = ?"); values.push(last_name || null); }
     if (email !== undefined) { updates.push("email = ?"); values.push(email); }
+    if (username !== undefined) { updates.push("username = ?"); values.push(username.toLowerCase().replace(/[^a-z0-9_]/g, '')); }
     if (phone !== undefined) { updates.push("phone = ?"); values.push(phone || null); }
     if (is_di !== undefined) { updates.push("is_di = ?"); values.push(is_di ? 1 : 0); }
     if (user_type !== undefined) { updates.push("user_type = ?"); values.push(user_type); }
@@ -518,19 +548,85 @@ async function startServer() {
   });
 
   // Auth APIs
+  apiRouter.get("/auth/bootstrap-status", (req, res) => {
+    try {
+      const adminCountObj = db.prepare("SELECT COUNT(*) as count FROM users WHERE user_type LIKE '%Super Admin%'").get() as { count: number };
+      const userCountObj = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
+      res.json({
+        no_active_admins: adminCountObj.count === 0,
+        total_users: userCountObj.count
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  apiRouter.post("/auth/bootstrap-admin", (req, res) => {
+    const adminCountObj = db.prepare("SELECT COUNT(*) as count FROM users WHERE user_type LIKE '%Super Admin%'").get() as { count: number };
+    if (adminCountObj.count > 0) {
+      return res.status(400).json({ error: "Super Admin already exists. Bootstrap disabled." });
+    }
+
+    const { first_name, last_name, email, username, password } = req.body;
+    if (!first_name || !email || !username || !password) {
+      return res.status(400).json({ error: "All fields are required for bootstrap" });
+    }
+
+    const name = last_name ? `${first_name} ${last_name}` : first_name;
+    const avatar_url = `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name}`;
+    const cleanUsername = username.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    try {
+      const info = db.prepare("INSERT INTO users (name, first_name, last_name, email, username, password, user_type, is_di, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)")
+        .run(name, first_name, last_name || null, email, cleanUsername, password, "Human Super Admin", avatar_url);
+      const user = db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid);
+      res.status(201).json(user);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
   apiRouter.post("/auth/login", (req, res) => {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password are required" });
+    const { email, password, new_password } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: "Email or username is required" });
     }
-    const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
-    if (!user) {
-      return res.status(400).json({ error: "Invalid email or password" });
+
+    try {
+      const user = db.prepare("SELECT * FROM users WHERE email = ? OR username = ?").get(email, email) as any;
+      if (!user) {
+        return res.status(400).json({ error: "Invalid email/username or password" });
+      }
+
+      // Check if they need an initial password setup (password is either NULL, empty, 'password', or 'null')
+      const hasUnsetPassword = !user.password || user.password.trim() === '' || user.password === 'null' || user.password === 'password';
+
+      if (hasUnsetPassword) {
+        if (new_password) {
+          db.prepare("UPDATE users SET password = ? WHERE id = ?").run(new_password, user.id);
+          const updatedUser = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id);
+          return res.json(updatedUser);
+        } else {
+          return res.json({
+            needs_initial_password: true,
+            email: user.email,
+            username: user.username,
+            message: "Account detected without a custom password. Please set a password to continue."
+          });
+        }
+      }
+
+      if (!password) {
+        return res.status(400).json({ error: "Password is required" });
+      }
+
+      if (user.password !== password) {
+        return res.status(400).json({ error: "Invalid email/username or password" });
+      }
+
+      res.json(user);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
-    if (user.password !== password) {
-      return res.status(400).json({ error: "Invalid email or password" });
-    }
-    res.json(user);
   });
 
   apiRouter.post("/auth/google-sso", (req, res) => {
@@ -539,24 +635,39 @@ async function startServer() {
       return res.status(400).json({ error: "Email is required" });
     }
 
-    let user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
-    if (!user) {
-      // Create user
-      const uType = 'Human User';
-      const isDI = 0;
-      const avatar_url = `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name || 'Google'}`;
-      const name = last_name ? `${first_name} ${last_name}` : (first_name || email.split('@')[0]);
+    try {
+      let user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
+      if (!user) {
+        // Create user
+        const uType = 'Human User';
+        const isDI = 0;
+        const avatar_url = `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name || 'Google'}`;
+        const name = last_name ? `${first_name} ${last_name}` : (first_name || email.split('@')[0]);
+        
+        let baseUsername = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '');
+        if (!baseUsername) baseUsername = `user_${Date.now()}`;
+        let currentUsername = baseUsername;
+        let counter = 1;
+        while (true) {
+          const collision = db.prepare("SELECT id FROM users WHERE username = ?").get(currentUsername);
+          if (!collision) break;
+          currentUsername = `${baseUsername}${counter}`;
+          counter++;
+        }
 
-      const info = db.prepare("INSERT INTO users (name, first_name, last_name, email, is_di, user_type, avatar_url, google_id, password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(name, first_name || email.split('@')[0], last_name || null, email, isDI, uType, avatar_url, google_id || 'google_sso_simulated', 'password');
-      user = db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid);
-    } else {
-      if (!user.google_id && google_id) {
-        db.prepare("UPDATE users SET google_id = ? WHERE id = ?").run(google_id, user.id);
-        user.google_id = google_id;
+        const info = db.prepare("INSERT INTO users (name, first_name, last_name, email, username, is_di, user_type, avatar_url, google_id, password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(name, first_name || email.split('@')[0], last_name || null, email, currentUsername, isDI, uType, avatar_url, google_id || 'google_sso_simulated', 'password');
+        user = db.prepare("SELECT * FROM users WHERE id = ?").get(info.lastInsertRowid);
+      } else {
+        if (!user.google_id && google_id) {
+          db.prepare("UPDATE users SET google_id = ? WHERE id = ?").run(google_id, user.id);
+          user.google_id = google_id;
+        }
       }
+      res.json(user);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
-    res.json(user);
   });
 
   // User Scopes APIs

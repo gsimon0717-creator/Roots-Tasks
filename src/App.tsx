@@ -34,7 +34,8 @@ import {
   Phone,
   GitBranch,
   Key,
-  Copy
+  Copy,
+  Shield
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -127,6 +128,7 @@ interface User {
   first_name: string;
   last_name?: string;
   email: string;
+  username?: string;
   phone?: string;
   password?: string;
   google_id?: string;
@@ -266,6 +268,7 @@ export default function App() {
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [showCompleted, setShowCompleted] = useState(false);
   const [filterAssigneeId, setFilterAssigneeId] = useState<number | null>(null);
+  const [filterOrgIdForUsers, setFilterOrgIdForUsers] = useState<number | 'all'>('all');
 
   // Authentication & Login States
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
@@ -278,8 +281,26 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authFirstName, setAuthFirstName] = useState('');
   const [authLastName, setAuthLastName] = useState('');
+  const [authUsername, setAuthUsername] = useState('');
   const [authIsDI, setAuthIsDI] = useState(false);
   const [authIsRegistering, setAuthIsRegistering] = useState(false);
+  const [showSsoModal, setShowSsoModal] = useState(false);
+
+  // Initial password setup states for lock-out safety
+  const [needsInitialPassword, setNeedsInitialPassword] = useState(false);
+  const [initialPasswordEmail, setInitialPasswordEmail] = useState('');
+  const [initialPasswordUsername, setInitialPasswordUsername] = useState('');
+  const [newPasswordVal, setNewPasswordVal] = useState('');
+  const [confirmPasswordVal, setConfirmPasswordVal] = useState('');
+
+  // Admin bootstrap states
+  const [bootstrapStatus, setBootstrapStatus] = useState<{ no_active_admins: boolean; total_users: number } | null>(null);
+  const [showBootstrapModal, setShowBootstrapModal] = useState(false);
+  const [bootstrapFirstName, setBootstrapFirstName] = useState('');
+  const [bootstrapLastName, setBootstrapLastName] = useState('');
+  const [bootstrapEmail, setBootstrapEmail] = useState('');
+  const [bootstrapUsername, setBootstrapUsername] = useState('');
+  const [bootstrapPassword, setBootstrapPassword] = useState('');
 
   // User list password states
   const [newUserPassword, setNewUserPassword] = useState('password');
@@ -464,6 +485,15 @@ export default function App() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      fetch('/api/auth/bootstrap-status')
+        .then(res => res.json())
+        .then(data => setBootstrapStatus(data))
+        .catch(err => console.error("Error fetching bootstrap status:", err));
+    }
+  }, [currentUser]);
 
   // Organization Actions
   const addUser = async () => {
@@ -1138,7 +1168,7 @@ export default function App() {
     const handleLoginSubmit = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!authEmail || !authPassword) {
-        alert('Please fill email and password');
+        alert('Please fill email/username and password');
         return;
       }
       try {
@@ -1148,10 +1178,16 @@ export default function App() {
           body: JSON.stringify({ email: authEmail, password: authPassword }),
         });
         if (res.ok) {
-          const user = await res.json();
-          setCurrentUser(user);
-          localStorage.setItem('roots_logged_in_user', JSON.stringify(user));
-          fetchData();
+          const data = await res.json();
+          if (data.needs_initial_password) {
+            setNeedsInitialPassword(true);
+            setInitialPasswordEmail(data.email);
+            setInitialPasswordUsername(data.username || '');
+          } else {
+            setCurrentUser(data);
+            localStorage.setItem('roots_logged_in_user', JSON.stringify(data));
+            fetchData();
+          }
         } else {
           const err = await res.json();
           alert(err.error || 'Invalid credentials');
@@ -1162,10 +1198,45 @@ export default function App() {
       }
     };
 
-    const handleGoogleSSO = async (emailOverride?: string) => {
+    const handleSetInitialPassword = async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!newPasswordVal) {
+        alert('Please enter a password');
+        return;
+      }
+      if (newPasswordVal !== confirmPasswordVal) {
+        alert('Passwords do not match');
+        return;
+      }
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: initialPasswordEmail, new_password: newPasswordVal }),
+        });
+        if (res.ok) {
+          const user = await res.json();
+          setCurrentUser(user);
+          localStorage.setItem('roots_logged_in_user', JSON.stringify(user));
+          setNeedsInitialPassword(false);
+          setNewPasswordVal('');
+          setConfirmPasswordVal('');
+          fetchData();
+        } else {
+          const err = await res.json();
+          alert(err.error || 'Failed to update password');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Failed to update password');
+      }
+    };
+
+    const handleGoogleSSO = async (emailOverride?: string, firstNameOverride?: string, lastNameOverride?: string) => {
       const email = emailOverride || authEmail || 'user@example.com';
-      const first = email.split('@')[0];
+      const first = firstNameOverride || email.split('@')[0];
       const firstName = first.charAt(0).toUpperCase() + first.slice(1);
+      const lastName = lastNameOverride || 'SSO User';
       
       try {
         const res = await fetch('/api/auth/google-sso', {
@@ -1174,7 +1245,7 @@ export default function App() {
           body: JSON.stringify({
             email,
             first_name: firstName,
-            last_name: 'SSO User',
+            last_name: lastName,
             google_id: `google_${Date.now()}`
           })
         });
@@ -1182,6 +1253,7 @@ export default function App() {
           const user = await res.json();
           setCurrentUser(user);
           localStorage.setItem('roots_logged_in_user', JSON.stringify(user));
+          setShowSsoModal(false);
           fetchData();
         } else {
           const err = await res.json();
@@ -1194,7 +1266,7 @@ export default function App() {
 
     const handleRegisterSubmit = async (e: React.FormEvent) => {
       e.preventDefault();
-      if (!authEmail || !authFirstName || !authPassword) {
+      if (!authEmail || !authFirstName || !authPassword || !authUsername) {
         alert('Please fill all required fields');
         return;
       }
@@ -1207,6 +1279,7 @@ export default function App() {
             first_name: authFirstName,
             last_name: authLastName,
             email: authEmail,
+            username: authUsername.toLowerCase().trim(),
             is_di: authIsDI,
             user_type: uType,
             password: authPassword
@@ -1220,6 +1293,7 @@ export default function App() {
           setAuthPassword('');
           setAuthFirstName('');
           setAuthLastName('');
+          setAuthUsername('');
           setAuthIsRegistering(false);
           fetchData();
         } else {
@@ -1250,7 +1324,83 @@ export default function App() {
 
         <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md relative z-10">
           <div className="bg-slate-900/80 backdrop-blur-md py-8 px-6 shadow-2xl rounded-3xl border border-slate-800/80 sm:px-10">
-            {authIsRegistering ? (
+            {bootstrapStatus?.no_active_admins && (
+              <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-left">
+                <div className="flex items-start gap-2.5">
+                  <div className="p-1 bg-amber-500/20 text-amber-400 rounded-lg shrink-0 mt-0.5">
+                    <Shield size={16} />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-amber-300">No Super Admin Configured</h4>
+                    <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                      Roots is lock-protected. Activate the secure administrative bootstrap protocol to create the root super admin.
+                    </p>
+                    <button 
+                      type="button"
+                      onClick={() => setShowBootstrapModal(true)}
+                      className="mt-3 text-[10px] uppercase tracking-wider font-extrabold text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 px-3 py-1.5 rounded-lg border border-emerald-500/20 transition-all cursor-pointer"
+                    >
+                      Initialize Admin Bootstrap
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {needsInitialPassword ? (
+              <form className="space-y-6" onSubmit={handleSetInitialPassword}>
+                <div className="text-left">
+                  <h3 className="text-xl font-bold text-white mb-2">Configure Your Password</h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Welcome back, <strong className="text-emerald-400">@{initialPasswordUsername || initialPasswordEmail.split('@')[0]}</strong>! Please configure a secure password for your account to finalize signing in.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">New Password *</label>
+                  <input 
+                    type="password" 
+                    required 
+                    value={newPasswordVal} 
+                    onChange={e => setNewPasswordVal(e.target.value)}
+                    className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 text-sm"
+                    placeholder="••••••••"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Confirm Password *</label>
+                  <input 
+                    type="password" 
+                    required 
+                    value={confirmPasswordVal} 
+                    onChange={e => setConfirmPasswordVal(e.target.value)}
+                    className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 text-sm"
+                    placeholder="••••••••"
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <button 
+                    type="button" 
+                    onClick={() => {
+                      setNeedsInitialPassword(false);
+                      setNewPasswordVal('');
+                      setConfirmPasswordVal('');
+                    }} 
+                    className="flex-1 text-center py-3 px-4 border border-slate-700 rounded-2xl text-sm font-semibold text-slate-300 hover:bg-slate-800 transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit" 
+                    className="flex-1 flex justify-center py-3 px-4 border border-transparent rounded-2xl shadow-sm text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition-colors cursor-pointer"
+                  >
+                    Set Password
+                  </button>
+                </div>
+              </form>
+            ) : authIsRegistering ? (
               <form className="space-y-6" onSubmit={handleRegisterSubmit}>
                 <h3 className="text-lg font-semibold text-white mb-4">Create Your Account</h3>
                 
@@ -1291,6 +1441,18 @@ export default function App() {
                 </div>
 
                 <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Username * (used for sign in)</label>
+                  <input 
+                    type="text" 
+                    required 
+                    value={authUsername} 
+                    onChange={e => setAuthUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                    className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 text-sm"
+                    placeholder="e.g. john_doe"
+                  />
+                </div>
+
+                <div>
                   <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Password *</label>
                   <input 
                     type="password" 
@@ -1315,7 +1477,7 @@ export default function App() {
 
                 <button 
                   type="submit" 
-                  className="w-full flex justify-center py-3 px-4 border border-transparent rounded-2xl shadow-sm text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition-colors"
+                  className="w-full flex justify-center py-3 px-4 border border-transparent rounded-2xl shadow-sm text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition-colors cursor-pointer"
                 >
                   Create Account
                 </button>
@@ -1324,7 +1486,7 @@ export default function App() {
                   <button 
                     type="button" 
                     onClick={() => setAuthIsRegistering(false)} 
-                    className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold"
+                    className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold cursor-pointer"
                   >
                     Already have an account? Sign In
                   </button>
@@ -1335,14 +1497,14 @@ export default function App() {
                 <h3 className="text-lg font-semibold text-white mb-4">Sign In with Password</h3>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Email Address</label>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Email Address or Username</label>
                   <input 
-                    type="email" 
+                    type="text" 
                     required 
                     value={authEmail} 
                     onChange={e => setAuthEmail(e.target.value)}
                     className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 text-sm"
-                    placeholder="john@example.com"
+                    placeholder="john@example.com or john"
                   />
                 </div>
 
@@ -1360,7 +1522,7 @@ export default function App() {
 
                 <button 
                   type="submit" 
-                  className="w-full flex justify-center py-3 px-4 border border-transparent rounded-2xl shadow-sm text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition-colors"
+                  className="w-full flex justify-center py-3 px-4 border border-transparent rounded-2xl shadow-sm text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition-colors cursor-pointer"
                 >
                   Sign In
                 </button>
@@ -1377,8 +1539,8 @@ export default function App() {
                 {/* Google SSO Button */}
                 <button 
                   type="button" 
-                  onClick={() => handleGoogleSSO()}
-                  className="w-full flex items-center justify-center gap-3 py-3 px-4 bg-slate-800 border border-slate-700 text-slate-300 font-semibold text-sm rounded-2xl hover:bg-slate-700/80 transition-colors"
+                  onClick={() => setShowSsoModal(true)}
+                  className="w-full flex items-center justify-center gap-3 py-3 px-4 bg-slate-800 border border-slate-700 text-slate-300 font-semibold text-sm rounded-2xl hover:bg-slate-700/80 transition-colors cursor-pointer"
                 >
                   <svg className="w-4 h-4 mr-1" viewBox="0 0 24 24">
                     <path fill="#EA4335" d="M12 5.04c1.66 0 3.2.57 4.38 1.69l3.27-3.27C17.67 1.48 14.97 1 12 1 7.24 1 3.2 3.74 1.24 7.74l3.85 3c.9-2.7 3.41-4.7 6.91-4.7z"/>
@@ -1393,7 +1555,7 @@ export default function App() {
                   <button 
                     type="button" 
                     onClick={() => setAuthIsRegistering(true)} 
-                    className="text-emerald-400 hover:text-emerald-300 font-semibold"
+                    className="text-emerald-400 hover:text-emerald-300 font-semibold cursor-pointer"
                   >
                     No account? Register
                   </button>
@@ -1464,6 +1626,239 @@ export default function App() {
             </div>
           </div>
         </div>
+
+        {showBootstrapModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 relative overflow-hidden shadow-2xl text-left">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg flex items-center justify-center">
+                    <Shield size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-white font-sans">Bootstrap Super Admin</h3>
+                    <p className="text-xs text-amber-400 font-mono">Administrative Genesis Protocol</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowBootstrapModal(false)}
+                  className="text-slate-400 hover:text-white p-1 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-400 mb-4 font-sans leading-relaxed">
+                Set up the initial Master Administrator credentials. Once created, future bootstrap attempts are permanently locked.
+              </p>
+
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (!bootstrapFirstName || !bootstrapEmail || !bootstrapUsername || !bootstrapPassword) {
+                  alert('Please fill out all required fields');
+                  return;
+                }
+                try {
+                  const res = await fetch('/api/auth/bootstrap-admin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      first_name: bootstrapFirstName,
+                      last_name: bootstrapLastName,
+                      email: bootstrapEmail,
+                      username: bootstrapUsername.toLowerCase().trim(),
+                      password: bootstrapPassword
+                    })
+                  });
+                  if (res.ok) {
+                    const user = await res.json();
+                    setCurrentUser(user);
+                    localStorage.setItem('roots_logged_in_user', JSON.stringify(user));
+                    setShowBootstrapModal(false);
+                    fetchData();
+                  } else {
+                    const err = await res.json();
+                    alert(err.error || 'Bootstrap failed');
+                  }
+                } catch (err) {
+                  console.error(err);
+                  alert('Bootstrap failed');
+                }
+              }} className="space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5">First Name *</label>
+                    <input 
+                      type="text" 
+                      required 
+                      value={bootstrapFirstName} 
+                      onChange={e => setBootstrapFirstName(e.target.value)}
+                      className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none"
+                      placeholder="Admin"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5">Last Name</label>
+                    <input 
+                      type="text" 
+                      value={bootstrapLastName} 
+                      onChange={e => setBootstrapLastName(e.target.value)}
+                      className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none"
+                      placeholder="User"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5">Email *</label>
+                  <input 
+                    type="email" 
+                    required 
+                    value={bootstrapEmail} 
+                    onChange={e => setBootstrapEmail(e.target.value)}
+                    className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none"
+                    placeholder="admin@example.com"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5">Username * (used for sign in)</label>
+                  <input 
+                    type="text" 
+                    required 
+                    value={bootstrapUsername} 
+                    onChange={e => setBootstrapUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                    className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none"
+                    placeholder="admin"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5">Password *</label>
+                  <input 
+                    type="password" 
+                    required 
+                    value={bootstrapPassword} 
+                    onChange={e => setBootstrapPassword(e.target.value)}
+                    className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none"
+                    placeholder="••••••••"
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowBootstrapModal(false)}
+                    className="flex-1 text-center py-2.5 px-4 border border-slate-700 rounded-xl text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs py-2.5 rounded-xl transition-all uppercase tracking-wider cursor-pointer"
+                  >
+                    Confirm Genesis
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {showSsoModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 relative overflow-hidden shadow-2xl text-left">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 bg-slate-800 rounded-lg flex items-center justify-center">
+                    <svg className="w-5 h-5" viewBox="0 0 24 24">
+                      <path fill="#EA4335" d="M12 5.04c1.66 0 3.2.57 4.38 1.69l3.27-3.27C17.67 1.48 14.97 1 12 1 7.24 1 3.2 3.74 1.24 7.74l3.85 3c.9-2.7 3.41-4.7 6.91-4.7z"/>
+                      <path fill="#4285F4" d="M23.49 12.27c0-.81-.07-1.59-.2-2.36H12v4.47h6.43c-.28 1.47-1.11 2.71-2.36 3.56l3.66 2.84c2.14-1.97 3.76-4.88 3.76-8.51z"/>
+                      <path fill="#FBBC05" d="M5.09 10.74c-.23-.69-.36-1.42-.36-2.19s.13-1.5.36-2.19L1.24 3.36C.45 4.96 0 6.74 0 8.55s.45 3.59 1.24 5.19l3.85-3z"/>
+                      <path fill="#34A853" d="M12 23c3.24 0 5.97-1.07 7.96-2.91l-3.66-2.84c-1.01.68-2.31 1.09-4.3 1.09-3.5 0-6.01-2-6.91-4.7l-3.85 3C3.2 20.26 7.24 23 12 23z"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-white">Google SSO Simulator</h3>
+                    <p className="text-xs text-slate-400">Secure Sandboxed Sign-In</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowSsoModal(false)}
+                  className="text-slate-400 hover:text-white p-1 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-400 mb-4">
+                Select a workspace identity or input a custom Google account to simulate the SSO callback.
+              </p>
+
+              {/* Account Quick Selectors */}
+              <div className="space-y-2 max-h-48 overflow-y-auto pr-1 mb-4">
+                {[
+                  { email: 'gsimon0717@gmail.com', name: 'Gregory Simon' },
+                  { email: 'audrey@google.com', name: 'Audrey (VC Corporate)' },
+                  { email: 'john@example.com', name: 'John Doe (Super Admin)' },
+                  { email: 'jane@example.com', name: 'Jane Smith (Admin)' },
+                ].map(acc => (
+                  <button
+                    key={acc.email}
+                    onClick={() => handleGoogleSSO(acc.email, acc.name.split(' ')[0], acc.name.split(' ').slice(1).join(' '))}
+                    className="w-full flex items-center justify-between p-2.5 bg-slate-800/50 hover:bg-slate-800 rounded-xl border border-slate-800 hover:border-slate-700 transition-all text-left cursor-pointer group"
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-full bg-emerald-700 text-white font-bold flex items-center justify-center text-xs">
+                        {acc.name.charAt(0)}
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold text-white group-hover:text-emerald-400 transition-colors">{acc.name}</p>
+                        <p className="text-[10px] text-slate-500">{acc.email}</p>
+                      </div>
+                    </div>
+                    <span className="text-[10px] uppercase font-black text-emerald-500 tracking-wider">Select</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="border-t border-slate-800 pt-3">
+                <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Simulate Custom Account</p>
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    id="sso-custom-name"
+                    placeholder="Full Name (e.g. Alice Johnson)"
+                    className="w-full px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none"
+                  />
+                  <input
+                    type="email"
+                    id="sso-custom-email"
+                    placeholder="Google Email (e.g. alice@example.com)"
+                    className="w-full px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none"
+                  />
+                  <button
+                    onClick={() => {
+                      const nameEl = document.getElementById('sso-custom-name') as HTMLInputElement;
+                      const emailEl = document.getElementById('sso-custom-email') as HTMLInputElement;
+                      if (!emailEl.value) {
+                        alert('Please fill at least the Google Email field');
+                        return;
+                      }
+                      const parts = nameEl.value.trim().split(' ');
+                      const fN = parts[0] || emailEl.value.split('@')[0];
+                      const lN = parts.slice(1).join(' ') || 'User';
+                      handleGoogleSSO(emailEl.value.trim(), fN, lN);
+                    }}
+                    className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs py-2 rounded-xl transition-all uppercase tracking-wider cursor-pointer"
+                  >
+                    Authorize SSO Callback
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1650,11 +2045,11 @@ export default function App() {
 
                           {/* Due Date */}
                           <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
-                            {task.due_date || editingDueDateTaskId === task.id ? (
+                            {((task.due_date && task.due_date !== 'null' && task.due_date.trim() !== '') || editingDueDateTaskId === task.id) ? (
                               <input
                                 autoFocus={editingDueDateTaskId === task.id}
                                 type="date"
-                                value={task.due_date ? task.due_date.split('T')[0] : ''}
+                                value={task.due_date && task.due_date !== 'null' ? task.due_date.split('T')[0] : ''}
                                 onChange={(e) => {
                                   updateTaskDetails(task.id, { due_date: e.target.value });
                                   if (e.target.value) {
@@ -3154,11 +3549,11 @@ export default function App() {
                             </select>
                           </td>
                           <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
-                            {task.due_date || editingDueDateTaskId === task.id ? (
+                            {((task.due_date && task.due_date !== 'null' && task.due_date.trim() !== '') || editingDueDateTaskId === task.id) ? (
                               <input
                                 autoFocus={editingDueDateTaskId === task.id}
                                 type="date"
-                                value={task.due_date ? task.due_date.split('T')[0] : ''}
+                                value={task.due_date && task.due_date !== 'null' ? task.due_date.split('T')[0] : ''}
                                 onChange={(e) => {
                                   updateTaskDetails(task.id, { due_date: e.target.value });
                                   if (e.target.value) {
@@ -3859,8 +4254,38 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Directory Filter Panel */}
+              <div className="bg-slate-50 border border-slate-200/60 p-4 rounded-3xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 select-none">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-white shadow-xs border border-slate-100 flex items-center justify-center text-slate-500">
+                    <Building size={15} />
+                  </div>
+                  <div>
+                    <span className="text-xs font-black text-slate-800 uppercase tracking-wider block">Auditing workspace clearance</span>
+                    <span className="text-[10px] text-slate-400 font-medium mt-0.5 block">Identify all operators cleared for a specific organization</span>
+                  </div>
+                </div>
+                <select
+                  value={filterOrgIdForUsers}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setFilterOrgIdForUsers(val === 'all' ? 'all' : Number(val));
+                  }}
+                  className="bg-white border border-slate-200 text-xs rounded-xl px-4 py-2.5 font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 cursor-pointer"
+                >
+                  <option value="all">🌐 All Clearances (Show Everyone)</option>
+                  {organizations.map(org => (
+                    <option key={org.id} value={org.id}>🏢 {org.name} Workspace Only</option>
+                  ))}
+                </select>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {users.map(user => (
+                {users.filter(user => {
+                  if (filterOrgIdForUsers === 'all') return true;
+                  if (user.user_type.includes('Super Admin')) return true;
+                  return allUserScopes.some(s => s.user_id === user.id && s.scope_type === 'organization' && Number(s.scope_id) === Number(filterOrgIdForUsers));
+                }).map(user => (
                   <div key={user.id} className="bg-white border border-slate-200 rounded-[32px] p-6 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden group flex flex-col justify-between min-h-[300px]">
                     <div>
                       {user.is_di ? (
@@ -3881,7 +4306,8 @@ export default function App() {
                           <h3 className="text-xl font-black text-slate-900 truncate">
                             {user.first_name} {user.last_name || ''}
                           </h3>
-                          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-0.5">{user.user_type}</p>
+                          <p className="text-xs font-bold text-emerald-600 font-mono tracking-tight leading-none my-1">@{user.username || user.email.split('@')[0]}</p>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">{user.user_type}</p>
                         </div>
                       </div>
                       
