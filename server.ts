@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
+import crypto from "crypto";
 import pg from "pg";
 
 const { Pool } = pg;
@@ -43,7 +44,16 @@ async function initDB() {
       last_name TEXT,
       email TEXT UNIQUE NOT NULL,
       phone TEXT,
-      password TEXT DEFAULT 'password',
+      -- SECURITY FIX (2026-07-03): was `DEFAULT 'password'` — a guessable
+      -- literal baked into the schema (and into seed data for every human
+      -- user, including Greg's own account). Removed the default; new rows
+      -- must supply a real password (see POST /users below, which now
+      -- generates a random one if the caller doesn't provide one). This does
+      -- NOT fix already-seeded rows still holding the literal 'password' —
+      -- those need a live UPDATE, see the rotation note Greg has separately.
+      -- Passwords are still stored/compared in plaintext (see /auth/login) —
+      -- that's a separate, larger fix (hashing) not included in this pass.
+      password TEXT,
       google_id TEXT,
       avatar_url TEXT,
       is_di BOOLEAN DEFAULT FALSE,
@@ -125,6 +135,37 @@ async function initDB() {
       scope_id INTEGER NOT NULL
     );
   `);
+
+  // Phase 5: one DI (agent) user per dashboard agent, with a fixed,
+  // deterministic api_key so the agent-dashboard service can reference it
+  // directly as an env var without a separate provisioning round trip.
+  // Safe to re-run - ON CONFLICT (email) DO NOTHING.
+  await pool.query(`
+    INSERT INTO users (name, first_name, last_name, email, is_di, user_type, api_key) VALUES
+      ('Sandie', 'Sandie', NULL, 'sandie@starstreamlabs.com', TRUE, 'DI Agent', 'roots_di_sandie_2026'),
+      ('Cole', 'Cole', NULL, 'cole@starstreamlabs.com', TRUE, 'DI Agent', 'roots_di_cole_2026'),
+      ('Audrey', 'Audrey', NULL, 'audrey@starstreamlabs.com', TRUE, 'DI Agent', 'roots_di_audrey_2026'),
+      ('Atlas', 'Atlas', NULL, 'atlas@starstreamlabs.com', TRUE, 'DI Agent', 'roots_di_atlas_2026')
+    ON CONFLICT (email) DO NOTHING;
+  `);
+}
+
+// SECURITY FIX (emergency, 2026-07-08): GET /users (and every other endpoint
+// that returns a user row) was doing `SELECT * FROM users`, which includes
+// the plaintext `password` column — meaning ANY unauthenticated caller could
+// dump every user's plaintext password with a single GET request. This
+// strips `password` from every user object before it leaves the server,
+// regardless of auth state. This does not fix plaintext storage/comparison
+// itself (still done in /auth/login) — that's the separate bcrypt migration
+// tracked separately; this only stops the password from being handed out
+// over the API.
+function sanitizeUser(u: any): any {
+  if (!u || typeof u !== "object") return u;
+  const { password, ...rest } = u;
+  return rest;
+}
+function sanitizeUsers(rows: any[]): any[] {
+  return rows.map(sanitizeUser);
 }
 
 async function getHydratedTask(taskId: number | string) {
@@ -343,7 +384,7 @@ async function startServer() {
   // --- USERS ---
   apiRouter.get("/users", async (req, res) => {
     const { rows } = await pool.query("SELECT * FROM users ORDER BY first_name ASC");
-    res.json(rows);
+    res.json(sanitizeUsers(rows));
   });
 
   apiRouter.post("/users", async (req, res) => {
@@ -354,12 +395,20 @@ async function startServer() {
       : `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name}`;
     const name = last_name ? `${first_name} ${last_name}` : first_name;
     const api_key = is_di ? `roots_di_${Math.random().toString(16).substring(2, 10)}` : null;
+    // SECURITY FIX (2026-07-03): used to silently fall back to the literal
+    // "password" if none was supplied. Now generates a random one-time
+    // password instead and returns it in the response — the caller is
+    // responsible for delivering it to the user and prompting a change.
+    // Never falls back to a known/guessable value.
+    const generatedPassword = password || crypto.randomBytes(12).toString("base64url");
     try {
       const { rows } = await pool.query(
         "INSERT INTO users (name, first_name, last_name, email, phone, is_di, user_type, avatar_url, password, api_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
-        [name, first_name, last_name || null, email, phone || null, is_di || false, user_type, avatar_url, password || "password", api_key]
+        [name, first_name, last_name || null, email, phone || null, is_di || false, user_type, avatar_url, generatedPassword, api_key]
       );
-      res.status(201).json(rows[0]);
+      const responseUser: any = sanitizeUser(rows[0]);
+      if (!password) responseUser.generatedPassword = generatedPassword; // only surfaced when we made it up, and only this once
+      res.status(201).json(responseUser);
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
@@ -409,7 +458,7 @@ async function startServer() {
 
     try {
       const { rows } = await pool.query(`UPDATE users SET ${updates.join(", ")} WHERE id = $${values.length} RETURNING *`, values);
-      res.json(rows[0]);
+      res.json(sanitizeUser(rows[0]));
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
@@ -427,7 +476,7 @@ async function startServer() {
     if (!email || !password) return res.status(400).json({ error: "Email and password are required" });
     const { rows: [user] } = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
     if (!user || user.password !== password) return res.status(400).json({ error: "Invalid email or password" });
-    res.json(user);
+    res.json(sanitizeUser(user));
   });
 
   apiRouter.post("/auth/google-sso", async (req, res) => {
@@ -438,15 +487,21 @@ async function startServer() {
     if (!user) {
       const name = last_name ? `${first_name} ${last_name}` : (first_name || email.split("@")[0]);
       const avatar_url = `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name || "Google"}`;
+      // SECURITY FIX (2026-07-03): was the literal "password" — meaning an
+      // SSO-only account could also be logged into via plain
+      // /auth/login with that known password, bypassing Google auth
+      // entirely. Use an unguessable random value instead; this account is
+      // meant to authenticate via SSO only.
+      const ssoPlaceholderPassword = crypto.randomBytes(24).toString("base64url");
       const { rows } = await pool.query(
         "INSERT INTO users (name, first_name, last_name, email, is_di, user_type, avatar_url, google_id, password) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
-        [name, first_name || email.split("@")[0], last_name || null, email, false, "Human User", avatar_url, google_id || null, "password"]
+        [name, first_name || email.split("@")[0], last_name || null, email, false, "Human User", avatar_url, google_id || null, ssoPlaceholderPassword]
       );
       user = rows[0];
     } else if (!user.google_id && google_id) {
       await pool.query("UPDATE users SET google_id = $1 WHERE id = $2", [google_id, user.id]);
     }
-    res.json(user);
+    res.json(sanitizeUser(user));
   });
 
   // --- USER SCOPES ---
