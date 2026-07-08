@@ -1,20 +1,22 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Roots-Tasks
 
-# Run and deploy your AI Studio app
+Roots is Star Stream Labs' internal task/project management app (organizations → divisions → teams → projects → tasks/subtasks), backed by Express + PostgreSQL and deployed on Google Cloud Run.
 
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/b69ef5eb-6b11-43aa-b179-057f2be5e7b6
+Note: this repo was originally scaffolded in Google AI Studio, but no longer uses Gemini or any AI Studio tooling — the app is a plain Express/PostgreSQL/React stack.
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
-
+**Prerequisites:** Node.js, a PostgreSQL database
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Set `DATABASE_URL` in `.env` to your Postgres connection string, e.g.:
+   `postgresql://USER:PASSWORD@localhost:5432/roots_tasks`
 3. Run the app:
    `npm run dev`
+
+## Build & Deploy
+
+- `npm run build` builds the frontend (Vite).
+- `npm start` runs the production server (`tsx server.ts`).
+- Deploys to Cloud Run automatically via a Cloud Build trigger on pushes to `main`. See the `Dockerfile` for the build steps.
