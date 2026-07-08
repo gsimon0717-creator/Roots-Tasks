@@ -44,7 +44,7 @@ async function initDB() {
       last_name TEXT,
       email TEXT UNIQUE NOT NULL,
       phone TEXT,
-      -- SECURITY FIX (2026-07-03): was `DEFAULT 'password'` — a guessable
+      -- SECURITY FIX (2026-07-03): was DEFAULT 'password' — a guessable
       -- literal baked into the schema (and into seed data for every human
       -- user, including Greg's own account). Removed the default; new rows
       -- must supply a real password (see POST /users below, which now
