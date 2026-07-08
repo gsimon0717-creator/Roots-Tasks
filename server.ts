@@ -4,6 +4,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
 import pg from "pg";
+import bcrypt from "bcryptjs";
 
 const { Pool } = pg;
 const __filename = fileURLToPath(import.meta.url);
@@ -13,6 +14,42 @@ const __dirname = path.dirname(__filename);
 // On Cloud Run: postgresql://USER:PASSWORD@/DBNAME?host=/cloudsql/PROJECT:REGION:INSTANCE
 // Local dev:    postgresql://USER:PASSWORD@localhost:5432/roots_tasks
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// SECURITY FIX (2026-07-08): password hashing. Passwords were previously
+// stored and compared in plaintext (see the removed history in /auth/login
+// and the users table comment above). All new/updated passwords are now
+// hashed with bcrypt before they ever reach the database, and a one-time
+// migration (see migratePlaintextPasswords, called from startServer) hashes
+// any pre-existing plaintext rows in place. BCRYPT_HASH_RE is used to tell
+// an already-hashed value apart from plaintext so the migration is
+// idempotent (safe to run on every startup) and so hashPassword never
+// double-hashes a value that's already a bcrypt hash.
+const BCRYPT_HASH_RE = /^\$2[aby]\$/;
+function looksHashed(value: string | null | undefined): boolean {
+  return typeof value === "string" && BCRYPT_HASH_RE.test(value);
+}
+async function hashPassword(plain: string): Promise<string> {
+  return bcrypt.hash(plain, 10);
+}
+
+// One-time (but idempotent/safe-to-repeat) migration: finds any users row
+// whose password column is still plaintext (i.e. doesn't match a bcrypt hash
+// prefix) and hashes it in place. Rows that are already hashed are skipped,
+// so this is cheap to run on every server startup.
+async function migratePlaintextPasswords() {
+  const { rows } = await pool.query("SELECT id, password FROM users WHERE password IS NOT NULL");
+  const toMigrate = rows.filter((u: any) => !looksHashed(u.password));
+  if (!toMigrate.length) {
+    console.log("[password migration] no plaintext passwords found, nothing to do");
+    return;
+  }
+  console.log(`[password migration] hashing ${toMigrate.length} plaintext password(s)`);
+  for (const u of toMigrate) {
+    const hashed = await hashPassword(u.password);
+    await pool.query("UPDATE users SET password = $1 WHERE id = $2", [hashed, u.id]);
+  }
+  console.log(`[password migration] done`);
+}
 
 async function initDB() {
   await pool.query(`
@@ -236,6 +273,7 @@ async function getHydratedTask(taskId: number | string) {
 
 async function startServer() {
   await initDB();
+  await migratePlaintextPasswords();
 
   const app = express();
   const PORT = Number(process.env.PORT) || 8080;
@@ -407,10 +445,15 @@ async function startServer() {
     // responsible for delivering it to the user and prompting a change.
     // Never falls back to a known/guessable value.
     const generatedPassword = password || crypto.randomBytes(12).toString("base64url");
+    // SECURITY FIX (2026-07-08): the plaintext generatedPassword is only
+    // ever used for the one-time response below (so the caller can deliver
+    // it to the user) — the value actually written to the database is now
+    // always the bcrypt hash, never the plaintext.
+    const hashedPassword = await hashPassword(generatedPassword);
     try {
       const { rows } = await pool.query(
         "INSERT INTO users (name, first_name, last_name, email, phone, is_di, user_type, avatar_url, password, api_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
-        [name, first_name, last_name || null, email, phone || null, is_di || false, user_type, avatar_url, generatedPassword, api_key]
+        [name, first_name, last_name || null, email, phone || null, is_di || false, user_type, avatar_url, hashedPassword, api_key]
       );
       const responseUser: any = sanitizeUser(rows[0]);
       if (!password) responseUser.generatedPassword = generatedPassword; // only surfaced when we made it up, and only this once
@@ -440,7 +483,7 @@ async function startServer() {
     if (phone !== undefined) addUpdate("phone", phone || null);
     if (is_di !== undefined) addUpdate("is_di", is_di);
     if (user_type !== undefined) addUpdate("user_type", user_type);
-    if (password !== undefined) addUpdate("password", password);
+    if (password !== undefined) addUpdate("password", await hashPassword(password));
 
     if (regenerate_api_key) {
       addUpdate("api_key", `roots_di_${Math.random().toString(16).substring(2, 10)}`);
@@ -484,7 +527,13 @@ async function startServer() {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: "Email and password are required" });
     const { rows: [user] } = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    if (!user || user.password !== password) return res.status(400).json({ error: "Invalid email or password" });
+    // SECURITY FIX (2026-07-08): was a plaintext `!==` comparison. Now
+    // compares against the bcrypt hash. looksHashed guards against the
+    // (should-be-impossible-post-migration) edge case of a row that still
+    // holds a plaintext value, so a stray plaintext row fails closed instead
+    // of matching via bcrypt.compare on a non-hash string.
+    const passwordOk = !!user && looksHashed(user.password) && await bcrypt.compare(password, user.password);
+    if (!user || !passwordOk) return res.status(400).json({ error: "Invalid email or password" });
     res.json(sanitizeUser(user));
   });
 
@@ -502,9 +551,13 @@ async function startServer() {
       // entirely. Use an unguessable random value instead; this account is
       // meant to authenticate via SSO only.
       const ssoPlaceholderPassword = crypto.randomBytes(24).toString("base64url");
+      // SECURITY FIX (2026-07-08): store the bcrypt hash of the random
+      // placeholder, not the plaintext value itself, consistent with every
+      // other password write path.
+      const hashedSsoPassword = await hashPassword(ssoPlaceholderPassword);
       const { rows } = await pool.query(
         "INSERT INTO users (name, first_name, last_name, email, is_di, user_type, avatar_url, google_id, password) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
-        [name, first_name || email.split("@")[0], last_name || null, email, false, "Human User", avatar_url, google_id || null, ssoPlaceholderPassword]
+        [name, first_name || email.split("@")[0], last_name || null, email, false, "Human User", avatar_url, google_id || null, hashedSsoPassword]
       );
       user = rows[0];
     } else if (!user.google_id && google_id) {
