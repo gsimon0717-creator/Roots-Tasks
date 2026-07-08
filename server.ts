@@ -152,16 +152,22 @@ async function initDB() {
 
 // SECURITY FIX (emergency, 2026-07-08): GET /users (and every other endpoint
 // that returns a user row) was doing `SELECT * FROM users`, which includes
-// the plaintext `password` column — meaning ANY unauthenticated caller could
-// dump every user's plaintext password with a single GET request. This
-// strips `password` from every user object before it leaves the server,
-// regardless of auth state. This does not fix plaintext storage/comparison
-// itself (still done in /auth/login) — that's the separate bcrypt migration
-// tracked separately; this only stops the password from being handed out
-// over the API.
+// the plaintext `password` column AND the `api_key` column — meaning ANY
+// unauthenticated caller could dump every user's plaintext password, plus
+// every DI agent's live api_key (the same keys agent-dashboard uses to
+// authenticate as Sandie/Cole/Audrey/Atlas), with a single GET request. This
+// strips both fields from every user object before it leaves the server,
+// regardless of auth state. The one legitimate exception is immediately
+// after a POST /users or a PATCH /users/:id?regenerate_api_key=true call,
+// where the caller genuinely needs to see the key it just
+// created/regenerated — those two call sites re-attach api_key explicitly,
+// once, to their own response only.
+// This does not fix plaintext password storage/comparison itself (still
+// done in /auth/login) — that's the separate bcrypt migration tracked
+// separately; this only stops secrets from being handed out over the API.
 function sanitizeUser(u: any): any {
   if (!u || typeof u !== "object") return u;
-  const { password, ...rest } = u;
+  const { password, api_key, ...rest } = u;
   return rest;
 }
 function sanitizeUsers(rows: any[]): any[] {
@@ -408,6 +414,7 @@ async function startServer() {
       );
       const responseUser: any = sanitizeUser(rows[0]);
       if (!password) responseUser.generatedPassword = generatedPassword; // only surfaced when we made it up, and only this once
+      if (rows[0].api_key) responseUser.api_key = rows[0].api_key; // caller needs the key it just created, once
       res.status(201).json(responseUser);
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -458,7 +465,9 @@ async function startServer() {
 
     try {
       const { rows } = await pool.query(`UPDATE users SET ${updates.join(", ")} WHERE id = $${values.length} RETURNING *`, values);
-      res.json(sanitizeUser(rows[0]));
+      const responseUser: any = sanitizeUser(rows[0]);
+      if (regenerate_api_key) responseUser.api_key = rows[0].api_key; // caller asked for a new key, needs to see it once
+      res.json(responseUser);
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
