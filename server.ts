@@ -223,6 +223,61 @@ function sanitizeUsers(rows: any[]): any[] {
   return rows.map(sanitizeUser);
 }
 
+// SECURITY FIX (2026-07-09): authorization (not just authentication) for
+// user creation and access-scope management. Before this, any authenticated
+// caller -- including a plain "User" tier account, or a DI agent's API key
+// -- could call POST /users or POST/DELETE /api/user_scopes directly and
+// create accounts or grant itself any scope up to Super Admin, regardless
+// of what the frontend UI showed or hid. These mirror the client-side
+// user_type checks already in App.tsx (canManageOrganization and friends)
+// so both layers agree, but the server-side check is the one that actually
+// matters for security since the client can't be trusted.
+function isSuperAdminUser(u: any): boolean {
+  return typeof u?.user_type === "string" && u.user_type.includes("Super Admin");
+}
+function isAdminUser(u: any): boolean {
+  // "Admin" matches both the "Admin" and "Super Admin" tiers (both contain
+  // the substring), same convention the frontend already uses.
+  return typeof u?.user_type === "string" && u.user_type.includes("Admin");
+}
+
+// Resolves which organization a given scope belongs to, so an org-scoped
+// Admin's authority (granted via a user_scopes row of scope_type
+// 'organization') can be checked against scopes requested at any level
+// (division/team/project all roll up to one organization).
+async function resolveOrgIdForScope(scopeType: string, scopeId: number): Promise<number | null> {
+  if (scopeType === "organization") return scopeId;
+  if (scopeType === "division") {
+    const { rows } = await pool.query("SELECT organization_id FROM divisions WHERE id = $1", [scopeId]);
+    return rows[0]?.organization_id ?? null;
+  }
+  if (scopeType === "team") {
+    const { rows } = await pool.query("SELECT organization_id FROM teams WHERE id = $1", [scopeId]);
+    return rows[0]?.organization_id ?? null;
+  }
+  if (scopeType === "project") {
+    const { rows } = await pool.query(
+      "SELECT t.organization_id AS organization_id FROM projects p JOIN teams t ON p.team_id = t.id WHERE p.id = $1",
+      [scopeId]
+    );
+    return rows[0]?.organization_id ?? null;
+  }
+  return null;
+}
+
+// Super Admins can manage any organization. Org-scoped Admins can only
+// manage organizations they hold an explicit 'organization' user_scopes
+// row for. Everyone else (plain Users) can't manage any organization.
+async function canManageOrgServer(requester: any, orgId: number | null): Promise<boolean> {
+  if (isSuperAdminUser(requester)) return true;
+  if (!isAdminUser(requester) || !orgId) return false;
+  const { rows } = await pool.query(
+    "SELECT 1 FROM user_scopes WHERE user_id = $1 AND scope_type = 'organization' AND scope_id = $2",
+    [requester.id, orgId]
+  );
+  return rows.length > 0;
+}
+
 // SECURITY FIX (2026-07-09): real session support for human users. Human
 // logins previously got nothing back to authenticate with on subsequent
 // requests — only DI agents had an api_key. Sessions are opaque, high-
@@ -517,8 +572,38 @@ async function startServer() {
   });
 
   apiRouter.post("/users", async (req, res) => {
-    const { first_name, last_name, email, phone, is_di, user_type, password } = req.body;
+    // SECURITY FIX (2026-07-09): authorization for user creation. Previously
+    // any authenticated caller (any role, or a DI agent's API key) could
+    // create accounts, including new Super Admins. Now: only Super Admins
+    // (anywhere) or org-scoped Admins (within organizations they manage) may
+    // create users -- human or DI, same rule for both, per Greg's decision.
+    // Scoped Admins must also grant the new user at least one scope, and
+    // every scope requested must resolve to an organization they manage --
+    // otherwise a scoped Admin could create a user with no access boundary
+    // at all. Only Super Admins may mint another Super Admin account.
+    const requester = (req as any).user;
+    if (!isAdminUser(requester)) {
+      return res.status(403).json({ error: "Only Super Admins and Admins can create users" });
+    }
+    const { first_name, last_name, email, phone, is_di, user_type, password, scopes } = req.body;
     if (!first_name || !email || !user_type) return res.status(400).json({ error: "first_name, email, and user_type are required" });
+    if (typeof user_type === "string" && user_type.includes("Super Admin") && !isSuperAdminUser(requester)) {
+      return res.status(403).json({ error: "Only Super Admins can create Super Admin accounts" });
+    }
+    const requestedScopes: Array<{ scope_type: string; scope_id: number }> = Array.isArray(scopes)
+      ? scopes.filter((s: any) => s && s.scope_type && s.scope_id)
+      : [];
+    if (!isSuperAdminUser(requester)) {
+      if (!requestedScopes.length) {
+        return res.status(403).json({ error: "Admins must assign at least one scope (within an organization they manage) when creating a user" });
+      }
+      for (const s of requestedScopes) {
+        const orgId = await resolveOrgIdForScope(s.scope_type, s.scope_id);
+        if (!(await canManageOrgServer(requester, orgId))) {
+          return res.status(403).json({ error: `Not authorized to grant ${s.scope_type} scope ${s.scope_id}` });
+        }
+      }
+    }
     const avatar_url = is_di
       ? `https://api.dicebear.com/7.x/bottts/svg?seed=${first_name}`
       : `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name}`;
@@ -549,6 +634,20 @@ async function startServer() {
       const responseUser: any = sanitizeUser(rows[0]);
       if (!password) responseUser.generatedPassword = generatedPassword; // only surfaced when we made it up, and only this once
       if (rows[0].api_key) responseUser.api_key = rows[0].api_key; // caller needs the key it just created, once
+
+      // Assign the requested scopes now that the user exists. This is a
+      // brand-new user_id so there's no pre-existing scope row to collide
+      // with -- no need for the duplicate check POST /user_scopes does.
+      const createdScopes: any[] = [];
+      for (const s of requestedScopes) {
+        const { rows: scopeRows } = await pool.query(
+          "INSERT INTO user_scopes (user_id, scope_type, scope_id) VALUES ($1,$2,$3) RETURNING *",
+          [rows[0].id, s.scope_type, s.scope_id]
+        );
+        createdScopes.push(scopeRows[0]);
+      }
+      responseUser.scopes = createdScopes;
+
       res.status(201).json(responseUser);
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -713,8 +812,23 @@ async function startServer() {
   });
 
   apiRouter.post("/user_scopes", async (req, res) => {
+    // SECURITY FIX (2026-07-09): authorization. Previously any authenticated
+    // caller could grant any scope to any user, including granting itself
+    // organization-level access anywhere. Same rule as user creation: Super
+    // Admins can grant anything, org-scoped Admins only within organizations
+    // they manage.
+    const requester = (req as any).user;
     const { user_id, scope_type, scope_id } = req.body;
     if (!user_id || !scope_type || !scope_id) return res.status(400).json({ error: "user_id, scope_type, scope_id required" });
+    if (!isAdminUser(requester)) {
+      return res.status(403).json({ error: "Only Super Admins and Admins can assign scopes" });
+    }
+    if (!isSuperAdminUser(requester)) {
+      const orgId = await resolveOrgIdForScope(scope_type, scope_id);
+      if (!(await canManageOrgServer(requester, orgId))) {
+        return res.status(403).json({ error: "Not authorized to grant this scope" });
+      }
+    }
     const { rows: [exists] } = await pool.query(
       "SELECT id FROM user_scopes WHERE user_id = $1 AND scope_type = $2 AND scope_id = $3",
       [user_id, scope_type, scope_id]
@@ -728,7 +842,21 @@ async function startServer() {
   });
 
   apiRouter.delete("/user_scopes", async (req, res) => {
+    // SECURITY FIX (2026-07-09): same authorization as POST /user_scopes —
+    // previously any authenticated caller could revoke any scope from any
+    // user, which is just as much a privilege issue as granting one.
+    const requester = (req as any).user;
     const { user_id, scope_type, scope_id } = req.body;
+    if (!user_id || !scope_type || !scope_id) return res.status(400).json({ error: "user_id, scope_type, scope_id required" });
+    if (!isAdminUser(requester)) {
+      return res.status(403).json({ error: "Only Super Admins and Admins can revoke scopes" });
+    }
+    if (!isSuperAdminUser(requester)) {
+      const orgId = await resolveOrgIdForScope(scope_type, scope_id);
+      if (!(await canManageOrgServer(requester, orgId))) {
+        return res.status(403).json({ error: "Not authorized to revoke this scope" });
+      }
+    }
     const { rowCount } = await pool.query(
       "DELETE FROM user_scopes WHERE user_id = $1 AND scope_type = $2 AND scope_id = $3",
       [user_id, scope_type, scope_id]

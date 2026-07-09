@@ -239,6 +239,12 @@ export default function App() {
   const [newUserPhone, setNewUserPhone] = useState('');
   const [newUserIsDI, setNewUserIsDI] = useState(false);
   const [newUserType, setNewUserType] = useState<User['user_type']>('Human User');
+  // SECURITY FIX (2026-07-09): scope is now assigned in the same step as
+  // user creation (Greg's decision -- a new user should never be left with
+  // zero access after creation). Super Admins may leave this blank; the
+  // server rejects blank scopes from org-scoped Admins.
+  const [newUserScopeType, setNewUserScopeType] = useState<'organization' | 'division' | 'team' | 'project'>('organization');
+  const [newUserScopeId, setNewUserScopeId] = useState<number | ''>('');
 
   // User Editing States
   const [editingUser, setEditingUser] = useState<User | null>(null);
@@ -279,11 +285,6 @@ export default function App() {
 
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
-  const [authFirstName, setAuthFirstName] = useState('');
-  const [authLastName, setAuthLastName] = useState('');
-  const [authUsername, setAuthUsername] = useState('');
-  const [authIsDI, setAuthIsDI] = useState(false);
-  const [authIsRegistering, setAuthIsRegistering] = useState(false);
   const [showSsoModal, setShowSsoModal] = useState(false);
 
   // Initial password setup states for lock-out safety
@@ -503,6 +504,15 @@ export default function App() {
   // Organization Actions
   const addUser = async () => {
     if (!newUserFirstName || !newUserEmail || !newUserType) return;
+    // SECURITY FIX (2026-07-09): org-scoped Admins must grant at least one
+    // scope when creating a user (server enforces this too -- this is just
+    // a friendlier client-side check so Admins don't hit a 403 with no
+    // context). Super Admins may leave scope blank.
+    const isSuperAdminCreator = !!currentUser?.user_type.includes('Super Admin');
+    if (!isSuperAdminCreator && !newUserScopeId) {
+      alert('Please choose an access scope for this user (Super Admins can skip this).');
+      return;
+    }
     try {
       const res = await fetch('/api/users', {
         method: 'POST',
@@ -514,7 +524,8 @@ export default function App() {
           phone: newUserPhone,
           is_di: newUserIsDI,
           user_type: newUserType,
-          password: newUserPassword
+          password: newUserPassword,
+          scopes: newUserScopeId ? [{ scope_type: newUserScopeType, scope_id: Number(newUserScopeId) }] : []
         }),
       });
       if (res.ok) {
@@ -526,6 +537,8 @@ export default function App() {
         setNewUserIsDI(false);
         setNewUserType('Human User');
         setNewUserPassword('password');
+        setNewUserScopeType('organization');
+        setNewUserScopeId('');
         fetchData();
       } else {
         const err = await res.json();
@@ -1269,48 +1282,6 @@ export default function App() {
       }
     };
 
-    const handleRegisterSubmit = async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!authEmail || !authFirstName || !authPassword || !authUsername) {
-        alert('Please fill all required fields');
-        return;
-      }
-      const uType = authIsDI ? 'DI User' : 'Human User'; // default
-      try {
-        const res = await fetch('/api/users', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            first_name: authFirstName,
-            last_name: authLastName,
-            email: authEmail,
-            username: authUsername.toLowerCase().trim(),
-            is_di: authIsDI,
-            user_type: uType,
-            password: authPassword
-          })
-        });
-        if (res.ok) {
-          const user = await res.json();
-          setCurrentUser(user);
-          localStorage.setItem('roots_logged_in_user', JSON.stringify(user));
-          setAuthEmail('');
-          setAuthPassword('');
-          setAuthFirstName('');
-          setAuthLastName('');
-          setAuthUsername('');
-          setAuthIsRegistering(false);
-          fetchData();
-        } else {
-          const err = await res.json();
-          alert(err.error || 'Registration failed');
-        }
-      } catch (e) {
-        console.error(e);
-        alert('Registration failed');
-      }
-    };
-
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col justify-center py-12 px-6 lg:px-8 font-sans antialiased">
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-emerald-950/40 via-slate-950 to-slate-950 pointer-events-none" />
@@ -1405,99 +1376,15 @@ export default function App() {
                   </button>
                 </div>
               </form>
-            ) : authIsRegistering ? (
-              <form className="space-y-6" onSubmit={handleRegisterSubmit}>
-                <h3 className="text-lg font-semibold text-white mb-4">Create Your Account</h3>
-                
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">First Name *</label>
-                    <input 
-                      type="text" 
-                      required 
-                      value={authFirstName} 
-                      onChange={e => setAuthFirstName(e.target.value)}
-                      className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 text-sm"
-                      placeholder="John"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Last Name</label>
-                    <input 
-                      type="text" 
-                      value={authLastName} 
-                      onChange={e => setAuthLastName(e.target.value)}
-                      className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 text-sm"
-                      placeholder="Doe"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Email Address *</label>
-                  <input 
-                    type="email" 
-                    required 
-                    value={authEmail} 
-                    onChange={e => setAuthEmail(e.target.value)}
-                    className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 text-sm"
-                    placeholder="you@example.com"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Username * (used for sign in)</label>
-                  <input 
-                    type="text" 
-                    required 
-                    value={authUsername} 
-                    onChange={e => setAuthUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
-                    className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 text-sm"
-                    placeholder="e.g. john_doe"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Password *</label>
-                  <input 
-                    type="password" 
-                    required 
-                    value={authPassword} 
-                    onChange={e => setAuthPassword(e.target.value)}
-                    className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 text-sm"
-                    placeholder="••••••••"
-                  />
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <input 
-                    type="checkbox" 
-                    id="auth_is_di" 
-                    checked={authIsDI} 
-                    onChange={e => setAuthIsDI(e.target.checked)} 
-                    className="h-4 w-4 bg-slate-800 border bg-transparent text-emerald-600 focus:ring-0 focus:ring-offset-0 rounded"
-                  />
-                  <label htmlFor="auth_is_di" className="text-xs text-slate-300 font-medium">This is a Digital Intelligence role component</label>
-                </div>
-
-                <button 
-                  type="submit" 
-                  className="w-full flex justify-center py-3 px-4 border border-transparent rounded-2xl shadow-sm text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 transition-colors cursor-pointer"
-                >
-                  Create Account
-                </button>
-
-                <div className="text-center mt-4">
-                  <button 
-                    type="button" 
-                    onClick={() => setAuthIsRegistering(false)} 
-                    className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold cursor-pointer"
-                  >
-                    Already have an account? Sign In
-                  </button>
-                </div>
-              </form>
             ) : (
+              // SECURITY FIX (2026-07-09): open self-registration removed.
+              // Greg decided user creation is admin-gated (Super Admin
+              // anywhere, org-scoped Admin within their org) -- there is no
+              // self-service "Register" path anymore. This form previously
+              // posted to /api/users with a `username` field the backend
+              // never had a column for, so it was already broken; it's
+              // removed here rather than fixed, per the access-control
+              // decision.
               <form className="space-y-6" onSubmit={handleLoginSubmit}>
                 <h3 className="text-lg font-semibold text-white mb-4">Sign In with Password</h3>
 
@@ -1555,16 +1442,6 @@ export default function App() {
                   </svg>
                   Sign In with Google SSO
                 </button>
-
-                <div className="flex justify-between items-center text-xs mt-4">
-                  <button 
-                    type="button" 
-                    onClick={() => setAuthIsRegistering(true)} 
-                    className="text-emerald-400 hover:text-emerald-300 font-semibold cursor-pointer"
-                  >
-                    No account? Register
-                  </button>
-                </div>
               </form>
             )}
 
@@ -4250,13 +4127,20 @@ export default function App() {
                   <h2 className="text-4xl font-black tracking-tight text-slate-900 leading-tight">User Management</h2>
                   <p className="text-slate-500 font-medium mt-1">Manage human operators and Digital Intelligences (DI)</p>
                 </div>
-                <button 
-                  onClick={() => setIsAddingUser(true)}
-                  className="flex items-center gap-2 px-8 py-4 bg-emerald-600 text-white rounded-[24px] font-bold shadow-xl shadow-emerald-200 hover:bg-emerald-700 transition-all hover:scale-105 active:scale-95"
-                >
-                  <Plus size={20} />
-                  Add User
-                </button>
+                {/* SECURITY FIX (2026-07-09): only Super Admins and
+                    org-scoped Admins can create users -- matches the
+                    server-side enforcement added to POST /users. Plain
+                    Users no longer see this button (it would just 403 if
+                    they clicked it). */}
+                {(currentUser?.user_type.includes('Super Admin') || currentUser?.user_type.includes('Admin')) && (
+                  <button
+                    onClick={() => setIsAddingUser(true)}
+                    className="flex items-center gap-2 px-8 py-4 bg-emerald-600 text-white rounded-[24px] font-bold shadow-xl shadow-emerald-200 hover:bg-emerald-700 transition-all hover:scale-105 active:scale-95"
+                  >
+                    <Plus size={20} />
+                    Add User
+                  </button>
+                )}
               </div>
 
               {/* Directory Filter Panel */}
@@ -5173,30 +5057,96 @@ export default function App() {
 
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">User Type</label>
-                    <select 
+                    <select
                       value={newUserType}
                       onChange={(e) => setNewUserType(e.target.value as any)}
                       className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
                     >
                       {!newUserIsDI ? (
                         <>
-                          <option value="Human Super Admin">Human Super Admin</option>
+                          {/* SECURITY FIX (2026-07-09): only Super Admins can
+                              mint another Super Admin -- matches the 403 the
+                              server now returns for this, so a scoped Admin
+                              can't even select an option that would fail. */}
+                          {currentUser?.user_type.includes('Super Admin') && (
+                            <option value="Human Super Admin">Human Super Admin</option>
+                          )}
                           <option value="Human Admin">Human Admin</option>
                           <option value="Human User">Human User</option>
                         </>
                       ) : (
                         <>
-                          <option value="DI Super Admin">DI Super Admin</option>
+                          {currentUser?.user_type.includes('Super Admin') && (
+                            <option value="DI Super Admin">DI Super Admin</option>
+                          )}
                           <option value="DI Admin">DI Admin</option>
                           <option value="DI User">DI User</option>
                         </>
                       )}
                     </select>
                   </div>
+
+                  {/* SECURITY FIX (2026-07-09): scope is assigned in the
+                      same step as creation now, per Greg's decision, so a
+                      new user is never left with zero access. Options are
+                      filtered to what the CREATOR (currentUser) is allowed
+                      to grant -- the server enforces the same boundary, this
+                      is just so Admins don't see choices that would 403. */}
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">
+                      Access Scope {!currentUser?.user_type.includes('Super Admin') && '*'}
+                    </label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <select
+                        value={newUserScopeType}
+                        onChange={(e) => {
+                          setNewUserScopeType(e.target.value as any);
+                          setNewUserScopeId('');
+                        }}
+                        className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                      >
+                        <option value="organization">Organization</option>
+                        <option value="division">Division</option>
+                        <option value="team">Team</option>
+                        <option value="project">Project</option>
+                      </select>
+                      <select
+                        value={newUserScopeId}
+                        onChange={(e) => setNewUserScopeId(e.target.value ? Number(e.target.value) : '')}
+                        className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                      >
+                        <option value="">-- Choose {newUserScopeType} --</option>
+                        {newUserScopeType === 'organization' && organizations.filter(o => {
+                          return currentUser?.user_type.includes('Super Admin') || canManageOrganization(o.id);
+                        }).map(o => (
+                          <option key={o.id} value={o.id}>{o.name}</option>
+                        ))}
+                        {newUserScopeType === 'division' && divisions.filter(d => {
+                          return currentUser?.user_type.includes('Super Admin') || canManageOrganization(d.organization_id);
+                        }).map(d => (
+                          <option key={d.id} value={d.id}>{d.name} ({organizations.find(o => o.id === d.organization_id)?.name})</option>
+                        ))}
+                        {newUserScopeType === 'team' && teams.filter(t => {
+                          return currentUser?.user_type.includes('Super Admin') || canManageOrganization(t.organization_id);
+                        }).map(t => (
+                          <option key={t.id} value={t.id}>{t.name} ({organizations.find(o => o.id === t.organization_id)?.name})</option>
+                        ))}
+                        {newUserScopeType === 'project' && projects.filter(p => {
+                          const associatedOrg = getOrganizationOfProject(p.id);
+                          return currentUser?.user_type.includes('Super Admin') || (associatedOrg && canManageOrganization(associatedOrg));
+                        }).map(p => (
+                          <option key={p.id} value={p.id}>{p.name} ({teams.find(t => t.id === p.team_id)?.name})</option>
+                        ))}
+                      </select>
+                    </div>
+                    {!currentUser?.user_type.includes('Super Admin') && (
+                      <p className="text-[10px] text-slate-400 ml-1">Required -- new users need at least one scope to access anything.</p>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex gap-4 pt-4">
-                  <button 
+                  <button
                     onClick={() => setIsAddingUser(false)}
                     className="flex-grow py-4 border border-slate-200 text-slate-600 rounded-[20px] font-bold hover:bg-slate-50 transition-all"
                   >
