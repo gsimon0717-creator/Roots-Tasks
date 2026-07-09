@@ -436,6 +436,11 @@ export default function App() {
   };
 
   const logout = () => {
+    // SECURITY FIX (2026-07-09): also invalidate the session server-side —
+    // clearing localStorage alone would leave the token itself still valid
+    // for anyone who'd copied it. Fire-and-forget: logout should still
+    // clear local state even if this call fails (e.g. already expired).
+    fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     localStorage.removeItem('roots_logged_in_user');
     setCurrentUser(null);
   };

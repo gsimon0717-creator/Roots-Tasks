@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import pg from "pg";
 import bcrypt from "bcryptjs";
+import { OAuth2Client } from "google-auth-library";
 
 const { Pool } = pg;
 const __filename = fileURLToPath(import.meta.url);
@@ -185,6 +186,19 @@ async function initDB() {
       ('Atlas', 'Atlas', NULL, 'atlas@starstreamlabs.com', TRUE, 'DI Agent', 'roots_di_atlas_2026')
     ON CONFLICT (email) DO NOTHING;
   `);
+
+  // SECURITY FIX (2026-07-09): session support for human users, added as an
+  // idempotent migration (ADD COLUMN IF NOT EXISTS) so it's safe to run
+  // against the existing production database on every startup, same pattern
+  // as everything else in this function. DI agent rows are unaffected —
+  // they keep authenticating via api_key, never via session_token. This
+  // does NOT touch the 4 seed agent keys inserted above; nothing in this
+  // pass rotates or reads them differently.
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS session_token TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS session_expires_at TIMESTAMP;
+    CREATE UNIQUE INDEX IF NOT EXISTS users_session_token_idx ON users(session_token) WHERE session_token IS NOT NULL;
+  `);
 }
 
 // SECURITY FIX (emergency, 2026-07-08): GET /users (and every other endpoint
@@ -198,17 +212,77 @@ async function initDB() {
 // after a POST /users or a PATCH /users/:id?regenerate_api_key=true call,
 // where the caller genuinely needs to see the key it just
 // created/regenerated — those two call sites re-attach api_key explicitly,
-// once, to their own response only.
-// This does not fix plaintext password storage/comparison itself (still
-// done in /auth/login) — that's the separate bcrypt migration tracked
-// separately; this only stops secrets from being handed out over the API.
+// once, to their own response only. Also strips session_token for the same
+// reason (added 2026-07-09 alongside real session support).
 function sanitizeUser(u: any): any {
   if (!u || typeof u !== "object") return u;
-  const { password, api_key, ...rest } = u;
+  const { password, api_key, session_token, ...rest } = u;
   return rest;
 }
 function sanitizeUsers(rows: any[]): any[] {
   return rows.map(sanitizeUser);
+}
+
+// SECURITY FIX (2026-07-09): real session support for human users. Human
+// logins previously got nothing back to authenticate with on subsequent
+// requests — only DI agents had an api_key. Sessions are opaque, high-
+// entropy random tokens (crypto.randomBytes), looked up directly (same
+// approach as api_key — the token's entropy is the security boundary, not
+// secrecy of a hashing scheme), stored in the session_token/
+// session_expires_at columns added by the migration in initDB above.
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function generateSessionToken(): string {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+async function startSession(userId: number): Promise<string> {
+  const token = generateSessionToken();
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
+  await pool.query(
+    "UPDATE users SET session_token = $1, session_expires_at = $2 WHERE id = $3",
+    [token, expiresAt, userId]
+  );
+  return token;
+}
+
+function extractCredential(req: express.Request): string | undefined {
+  if (req.headers["x-api-key"]) return req.headers["x-api-key"] as string;
+  if (req.headers["authorization"]?.toLowerCase().startsWith("bearer ")) {
+    return (req.headers["authorization"] as string).substring(7).trim();
+  }
+  return undefined;
+}
+
+// SECURITY FIX (2026-07-09): real Google ID token verification. This
+// endpoint previously trusted whatever email/first_name/google_id the
+// caller put in the request body — nothing was ever checked against
+// Google, so anyone could claim any email address. Set
+// GOOGLE_OAUTH_CLIENT_ID (a real OAuth 2.0 Web Client ID from Google Cloud
+// Console) to enable Google SSO; until that's configured, the endpoint
+// refuses to authenticate anyone via Google rather than falling back to
+// trusting client-supplied fields. The frontend also still needs updating
+// to obtain a real Google ID token via Google Identity Services in place of
+// the current simulator UI — tracked separately, not done in this pass.
+const googleClientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
+const googleClient = googleClientId ? new OAuth2Client(googleClientId) : null;
+
+async function verifyGoogleIdToken(idToken: string): Promise<{ email: string; firstName: string; lastName: string; googleId: string } | null> {
+  if (!googleClient || !googleClientId) return null;
+  try {
+    const ticket = await googleClient.verifyIdToken({ idToken, audience: googleClientId });
+    const payload = ticket.getPayload();
+    if (!payload || !payload.email || !payload.email_verified) return null;
+    return {
+      email: payload.email,
+      firstName: payload.given_name || payload.email.split("@")[0],
+      lastName: payload.family_name || "",
+      googleId: payload.sub,
+    };
+  } catch (e: any) {
+    console.error("Google ID token verification failed:", e.message);
+    return null;
+  }
 }
 
 async function getHydratedTask(taskId: number | string) {
@@ -281,29 +355,40 @@ async function startServer() {
 
   const apiRouter = express.Router();
 
-  // API Key authentication middleware
-  apiRouter.use(async (req, res, next) => {
-    let apiKey: string | undefined;
-    if (req.headers["x-api-key"]) {
-      apiKey = req.headers["x-api-key"] as string;
-    } else if (req.headers["authorization"]?.toLowerCase().startsWith("bearer ")) {
-      apiKey = (req.headers["authorization"] as string).substring(7).trim();
-    }
+  // SECURITY FIX (2026-07-09): this used to only check a credential IF one
+  // was sent — a request with no X-API-Key/Authorization header at all was
+  // simply waved through via next() with no req.user set, meaning every
+  // route (tasks, users, orgs, teams, projects, every CRUD op including
+  // deletes) was fully accessible to anyone with zero credentials. Now
+  // rejects with 401 by default; PUBLIC_PATHS is the explicit, short
+  // allowlist of routes that must stay reachable without auth (the ones
+  // that exist specifically to let you become authenticated, plus the
+  // Cloud Run health check). req.path here is relative to this router's
+  // mount point (/api), so "/health" matches a request to /api/health.
+  const PUBLIC_PATHS = new Set(["/health", "/auth/login", "/auth/google-sso"]);
 
-    if (apiKey) {
-      try {
-        const { rows } = await pool.query("SELECT * FROM users WHERE api_key = $1", [apiKey]);
-        if (rows[0]) {
-          (req as any).user = rows[0];
-          console.log(`[API Auth] ${rows[0].name} authenticated via API Key`);
-        } else {
-          return res.status(401).json({ error: "Invalid API Key" });
-        }
-      } catch (e: any) {
-        console.error("API Auth error:", e);
-      }
+  apiRouter.use(async (req, res, next) => {
+    if (PUBLIC_PATHS.has(req.path)) return next();
+
+    const credential = extractCredential(req);
+    if (!credential) {
+      return res.status(401).json({ error: "Authentication required" });
     }
-    next();
+    try {
+      const { rows } = await pool.query(
+        `SELECT * FROM users WHERE api_key = $1
+           OR (session_token = $1 AND session_expires_at IS NOT NULL AND session_expires_at > NOW())`,
+        [credential]
+      );
+      if (!rows[0]) {
+        return res.status(401).json({ error: "Invalid or expired credentials" });
+      }
+      (req as any).user = rows[0];
+      next();
+    } catch (e: any) {
+      console.error("Auth check failed:", e);
+      res.status(500).json({ error: "Authentication check failed" });
+    }
   });
 
   apiRouter.get("/health", async (req, res) => {
@@ -438,7 +523,13 @@ async function startServer() {
       ? `https://api.dicebear.com/7.x/bottts/svg?seed=${first_name}`
       : `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name}`;
     const name = last_name ? `${first_name} ${last_name}` : first_name;
-    const api_key = is_di ? `roots_di_${Math.random().toString(16).substring(2, 10)}` : null;
+    // SECURITY FIX (2026-07-09): Math.random() is not cryptographically
+    // secure (~32 bits of real entropy here) and was guessable/brute-
+    // forceable. crypto.randomBytes matches the generator already used for
+    // passwords elsewhere in this file. This only affects NEWLY created DI
+    // agents — the 4 existing seed keys (Sandie/Cole/Audrey/Atlas) are
+    // untouched by this change.
+    const api_key = is_di ? `roots_di_${crypto.randomBytes(16).toString("hex")}` : null;
     // SECURITY FIX (2026-07-03): used to silently fall back to the literal
     // "password" if none was supplied. Now generates a random one-time
     // password instead and returns it in the response — the caller is
@@ -486,7 +577,9 @@ async function startServer() {
     if (password !== undefined) addUpdate("password", await hashPassword(password));
 
     if (regenerate_api_key) {
-      addUpdate("api_key", `roots_di_${Math.random().toString(16).substring(2, 10)}`);
+      // SECURITY FIX (2026-07-09): same Math.random() -> crypto.randomBytes
+      // fix as user creation above.
+      addUpdate("api_key", `roots_di_${crypto.randomBytes(16).toString("hex")}`);
     }
 
     const finalFirstName = first_name ?? user.first_name;
@@ -534,17 +627,44 @@ async function startServer() {
     // of matching via bcrypt.compare on a non-hash string.
     const passwordOk = !!user && looksHashed(user.password) && await bcrypt.compare(password, user.password);
     if (!user || !passwordOk) return res.status(400).json({ error: "Invalid email or password" });
-    res.json(sanitizeUser(user));
+    // SECURITY FIX (2026-07-09): issue a real session token now that every
+    // other route requires authentication. The frontend attaches this as
+    // `Authorization: Bearer <token>` on every subsequent request (see
+    // src/authFetch.ts) — it's carried inside the same
+    // roots_logged_in_user object already stored in localStorage.
+    const session_token = await startSession(user.id);
+    res.json({ ...sanitizeUser(user), session_token });
   });
 
   apiRouter.post("/auth/google-sso", async (req, res) => {
-    const { email, first_name, last_name, google_id } = req.body;
-    if (!email) return res.status(400).json({ error: "Email is required" });
+    // SECURITY FIX (2026-07-09): this endpoint used to trust whatever
+    // email/first_name/google_id the caller put in the request body, with
+    // nothing checked against Google — anyone could claim to be any email
+    // address (including an existing admin's) and get logged in or have an
+    // account silently created. It now requires a real Google-issued
+    // id_token and verifies it server-side; identity fields come ONLY from
+    // the verified token payload, never from the request body. Until
+    // GOOGLE_OAUTH_CLIENT_ID is configured (and the frontend is updated to
+    // obtain a real token via Google Identity Services, replacing today's
+    // simulator), this endpoint refuses every request rather than falling
+    // back to the old trust-the-body behavior.
+    const { id_token } = req.body;
+    if (!googleClientId) {
+      return res.status(501).json({ error: "Google SSO is not configured on this server. Use password login instead." });
+    }
+    if (!id_token) {
+      return res.status(400).json({ error: "id_token is required" });
+    }
+    const verified = await verifyGoogleIdToken(id_token);
+    if (!verified) {
+      return res.status(401).json({ error: "Invalid Google ID token" });
+    }
+    const { email, firstName, lastName, googleId } = verified;
 
     let { rows: [user] } = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
     if (!user) {
-      const name = last_name ? `${first_name} ${last_name}` : (first_name || email.split("@")[0]);
-      const avatar_url = `https://api.dicebear.com/7.x/avataaars/svg?seed=${first_name || "Google"}`;
+      const name = lastName ? `${firstName} ${lastName}` : firstName;
+      const avatar_url = `https://api.dicebear.com/7.x/avataaars/svg?seed=${firstName || "Google"}`;
       // SECURITY FIX (2026-07-03): was the literal "password" — meaning an
       // SSO-only account could also be logged into via plain
       // /auth/login with that known password, bypassing Google auth
@@ -557,13 +677,33 @@ async function startServer() {
       const hashedSsoPassword = await hashPassword(ssoPlaceholderPassword);
       const { rows } = await pool.query(
         "INSERT INTO users (name, first_name, last_name, email, is_di, user_type, avatar_url, google_id, password) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
-        [name, first_name || email.split("@")[0], last_name || null, email, false, "Human User", avatar_url, google_id || null, hashedSsoPassword]
+        [name, firstName, lastName || null, email, false, "Human User", avatar_url, googleId || null, hashedSsoPassword]
       );
       user = rows[0];
-    } else if (!user.google_id && google_id) {
-      await pool.query("UPDATE users SET google_id = $1 WHERE id = $2", [google_id, user.id]);
+    } else if (!user.google_id && googleId) {
+      await pool.query("UPDATE users SET google_id = $1 WHERE id = $2", [googleId, user.id]);
     }
-    res.json(sanitizeUser(user));
+    const session_token = await startSession(user.id);
+    res.json({ ...sanitizeUser(user), session_token });
+  });
+
+  // SECURITY FIX (2026-07-09): new. Lets the frontend confirm a stored
+  // session is still valid and pull fresh user data without re-logging in.
+  // Protected by the auth gate above (not in PUBLIC_PATHS), so req.user is
+  // already populated by the time this runs.
+  apiRouter.get("/auth/me", async (req, res) => {
+    res.json(sanitizeUser((req as any).user));
+  });
+
+  // SECURITY FIX (2026-07-09): new. Invalidates the caller's own session
+  // token server-side — clearing localStorage client-side alone would leave
+  // the token itself still valid for anyone who'd copied it.
+  apiRouter.post("/auth/logout", async (req, res) => {
+    await pool.query(
+      "UPDATE users SET session_token = NULL, session_expires_at = NULL WHERE id = $1",
+      [(req as any).user.id]
+    );
+    res.json({ success: true });
   });
 
   // --- USER SCOPES ---
