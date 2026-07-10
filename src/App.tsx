@@ -61,9 +61,20 @@ interface Team {
   created_at: string;
 }
 
+// TEMPLATE FEATURE (2026-07-10): optional tier under Team. A team with no
+// sub-teams works exactly as before; a team that needs finer structure can
+// have any number of them. Never required.
+interface SubTeam {
+  id: number;
+  team_id: number;
+  name: string;
+  created_at: string;
+}
+
 interface Project {
   id: number;
   team_id: number;
+  sub_team_id?: number | null;
   name: string;
   description: string;
   created_at: string;
@@ -162,6 +173,7 @@ export default function App() {
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [divisions, setDivisions] = useState<Division[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
+  const [subTeams, setSubTeams] = useState<SubTeam[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
@@ -172,6 +184,7 @@ export default function App() {
   const [selectedOrganization, setSelectedOrganization] = useState<Organization | null>(null);
   const [selectedDivision, setSelectedDivision] = useState<Division | null>(null);
   const [selectedTeam, setSelectedTeam] = useState<Team | null>(null);
+  const [selectedSubTeam, setSelectedSubTeam] = useState<SubTeam | null>(null);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
   // Division Form States
@@ -194,8 +207,13 @@ export default function App() {
 
   const [newTeamName, setNewTeamName] = useState('');
   const [isAddingTeam, setIsAddingTeam] = useState(false);
-  
+
+  // TEMPLATE FEATURE (2026-07-10): sub-team form state, same pattern as team.
+  const [newSubTeamName, setNewSubTeamName] = useState('');
+  const [isAddingSubTeam, setIsAddingSubTeam] = useState(false);
+
   const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectSubTeamId, setNewProjectSubTeamId] = useState<number | null>(null);
   const [isAddingProject, setIsAddingProject] = useState(false);
   const [showAllTasksAddForm, setShowAllTasksAddForm] = useState(false);
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
@@ -208,11 +226,15 @@ export default function App() {
   // Editing States
   const [editingTeamId, setEditingTeamId] = useState<number | null>(null);
   const [editingTeamName, setEditingTeamName] = useState('');
-  
+
+  const [editingSubTeamId, setEditingSubTeamId] = useState<number | null>(null);
+  const [editingSubTeamName, setEditingSubTeamName] = useState('');
+
   const [editingProjectId, setEditingProjectId] = useState<number | null>(null);
   const [editingProjectName, setEditingProjectName] = useState('');
   const [editingProjectDescription, setEditingProjectDescription] = useState('');
   const [editingProjectTeamId, setEditingProjectTeamId] = useState<number | null>(null);
+  const [editingProjectSubTeamId, setEditingProjectSubTeamId] = useState<number | null>(null);
   
   const [editingSectionId, setEditingSectionId] = useState<number | null>(null);
   const [editingSectionName, setEditingSectionName] = useState('');
@@ -243,7 +265,7 @@ export default function App() {
   // user creation (Greg's decision -- a new user should never be left with
   // zero access after creation). Super Admins may leave this blank; the
   // server rejects blank scopes from org-scoped Admins.
-  const [newUserScopeType, setNewUserScopeType] = useState<'organization' | 'division' | 'team' | 'project'>('organization');
+  const [newUserScopeType, setNewUserScopeType] = useState<'organization' | 'division' | 'team' | 'sub_team' | 'project'>('organization');
   const [newUserScopeId, setNewUserScopeId] = useState<number | ''>('');
 
   // User Editing States
@@ -308,7 +330,7 @@ export default function App() {
   const [editingUserPassword, setEditingUserPassword] = useState('');
   
   // Track selected Type for "Grant New Scope" dropdown in user cards
-  const [userScopeType, setUserScopeType] = useState<Record<number, 'organization' | 'division' | 'team' | 'project'>>({});
+  const [userScopeType, setUserScopeType] = useState<Record<number, 'organization' | 'division' | 'team' | 'sub_team' | 'project'>>({});
 
   // Permission checks (using divisions, teams, projects from states)
   const getOrganizationOfDivision = (divId: number | null | undefined): number | null => {
@@ -357,6 +379,15 @@ export default function App() {
     const project = projects.find(p => p.id === projId);
     if (!project) return null;
     return getDivisionOfTeam(project.team_id);
+  };
+
+  // TEMPLATE FEATURE (2026-07-10): sub-team rolls up through its parent team
+  // to a division, same pattern as getDivisionOfProject above.
+  const getDivisionOfSubTeam = (subTeamId: number | null | undefined): number | null => {
+    if (!subTeamId) return null;
+    const subTeam = subTeams.find(st => st.id === subTeamId);
+    if (!subTeam) return null;
+    return getDivisionOfTeam(subTeam.team_id);
   };
 
   const canManageDivision = (divisionId: number | null | undefined): boolean => {
@@ -480,29 +511,32 @@ export default function App() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [orgsRes, divisionsRes, teamsRes, projectsRes, tasksRes, allSectionsRes, usersRes, scopesRes] = await Promise.all([
+      const [orgsRes, divisionsRes, teamsRes, subTeamsRes, projectsRes, tasksRes, allSectionsRes, usersRes, scopesRes] = await Promise.all([
         fetch('/api/organizations'),
         fetch('/api/divisions'),
         fetch('/api/teams'),
+        fetch('/api/sub_teams'),
         fetch('/api/projects'),
         fetch('/api/tasks'),
         fetch('/api/sections'),
         fetch('/api/users'),
         fetch('/api/user_scopes')
       ]);
-      
+
       const orgsData = await orgsRes.json();
       const divisionsData = await divisionsRes.json();
       const teamsData = await teamsRes.json();
+      const subTeamsData = await subTeamsRes.json();
       const projectsData = await projectsRes.json();
       const tasksData = await tasksRes.json();
       const allSectionsData = await allSectionsRes.json();
       const usersData = await usersRes.json();
       const scopesData = await scopesRes.json();
-      
+
       setOrganizations(orgsData);
       setDivisions(divisionsData);
       setTeams(teamsData);
+      setSubTeams(subTeamsData);
       setProjects(projectsData);
       setTasks(tasksData);
       setUsers(usersData);
@@ -522,6 +556,22 @@ export default function App() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // TEMPLATE FEATURE (2026-07-10): clear the sub-team filter whenever the
+  // selected team changes, so switching teams doesn't silently carry over a
+  // sub-team filter that belongs to a different team (there are many click
+  // sites that call setSelectedTeam directly; a single effect here is safer
+  // than touching every one of them individually).
+  useEffect(() => {
+    setSelectedSubTeam(null);
+  }, [selectedTeam?.id]);
+
+  // Pre-fill the New Project modal's sub-team picker with whatever sub-team
+  // filter is currently active, so creating a project while viewing a
+  // specific sub-team's list defaults into that sub-team instead of "None".
+  useEffect(() => {
+    if (isAddingProject) setNewProjectSubTeamId(selectedSubTeam?.id ?? null);
+  }, [isAddingProject]);
 
   useEffect(() => {
     if (!currentUser) {
@@ -743,6 +793,45 @@ export default function App() {
     } catch (e) { console.error(e); }
   };
 
+  // Sub-Team Actions
+  // TEMPLATE FEATURE (2026-07-10): same CRUD pattern as Team above, one tier
+  // down. Every team can have sub-teams; creating one here never affects
+  // teams that don't use them.
+  const addSubTeam = async () => {
+    if (!newSubTeamName.trim() || !selectedTeam) return;
+    try {
+      await fetch('/api/sub_teams', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newSubTeamName, team_id: selectedTeam.id }),
+      });
+      setNewSubTeamName('');
+      setIsAddingSubTeam(false);
+      fetchData();
+    } catch (e) { console.error(e); }
+  };
+
+  const updateSubTeam = async (id: number, name: string) => {
+    try {
+      await fetch(`/api/sub_teams/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      setEditingSubTeamId(null);
+      fetchData();
+    } catch (e) { console.error(e); }
+  };
+
+  const deleteSubTeam = async (id: number) => {
+    if (!confirm('Delete this sub-team? Its projects will move up to sit directly under the team, not be deleted.')) return;
+    try {
+      await fetch(`/api/sub_teams/${id}`, { method: 'DELETE' });
+      if (selectedSubTeam?.id === id) setSelectedSubTeam(null);
+      fetchData();
+    } catch (e) { console.error(e); }
+  };
+
   // Project Actions
   const addProject = async () => {
     if (!newProjectName.trim() || !selectedTeam) return;
@@ -750,19 +839,21 @@ export default function App() {
       await fetch('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newProjectName, team_id: selectedTeam.id }),
+        body: JSON.stringify({ name: newProjectName, team_id: selectedTeam.id, sub_team_id: newProjectSubTeamId || selectedSubTeam?.id || null }),
       });
       setNewProjectName('');
+      setNewProjectSubTeamId(null);
       setIsAddingProject(false);
       fetchData();
     } catch (e) { console.error(e); }
   };
 
-  const updateProject = async (id: number, name: string, description: string, team_id?: number | null) => {
+  const updateProject = async (id: number, name: string, description: string, team_id?: number | null, sub_team_id?: number | null) => {
     try {
       const body: any = { name, description };
       if (team_id !== undefined) body.team_id = team_id;
-      
+      if (sub_team_id !== undefined) body.sub_team_id = sub_team_id;
+
       await fetch(`/api/projects/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -3817,7 +3908,7 @@ export default function App() {
                   <h2 className="text-3xl font-black tracking-tight text-slate-900">{selectedTeam.name} Projects</h2>
                   <p className="text-slate-500 font-medium">Select a project from the rows below to view its tasks and sections</p>
                 </div>
-                <button 
+                <button
                   onClick={() => setIsAddingProject(true)}
                   className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-2xl font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all hover:scale-105 active:scale-95"
                 >
@@ -3826,8 +3917,73 @@ export default function App() {
                 </button>
               </div>
 
+              {/* TEMPLATE FEATURE (2026-07-10): optional sub-team filter row.
+                  Every team can have sub-teams but none are required -- a
+                  team with zero sub-teams just shows nothing here and works
+                  exactly as before. */}
+              <div className="flex flex-wrap items-center gap-2 -mt-4">
+                <button
+                  onClick={() => setSelectedSubTeam(null)}
+                  className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-all ${!selectedSubTeam ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300'}`}
+                >
+                  All
+                </button>
+                {subTeams.filter(st => st.team_id === selectedTeam.id).map(st => (
+                  editingSubTeamId === st.id ? (
+                    <input
+                      key={st.id}
+                      autoFocus
+                      value={editingSubTeamName}
+                      onChange={e => setEditingSubTeamName(e.target.value)}
+                      onBlur={() => updateSubTeam(st.id, editingSubTeamName)}
+                      onKeyDown={e => { if (e.key === 'Enter') updateSubTeam(st.id, editingSubTeamName); if (e.key === 'Escape') setEditingSubTeamId(null); }}
+                      className="px-3 py-1.5 rounded-full text-xs font-bold border border-emerald-400 outline-none"
+                    />
+                  ) : (
+                    <div
+                      key={st.id}
+                      className={`group flex items-center gap-1.5 pl-3 pr-1.5 py-1.5 rounded-full text-xs font-bold border transition-all cursor-pointer ${selectedSubTeam?.id === st.id ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-500 border-slate-200 hover:border-emerald-400'}`}
+                      onClick={() => setSelectedSubTeam(selectedSubTeam?.id === st.id ? null : st)}
+                    >
+                      {st.name}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setEditingSubTeamId(st.id); setEditingSubTeamName(st.name); }}
+                        className="opacity-0 group-hover:opacity-100 hover:text-emerald-200 transition-opacity"
+                      >
+                        <Edit2 size={11} />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteSubTeam(st.id); }}
+                        className="opacity-0 group-hover:opacity-100 hover:text-red-300 transition-opacity"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  )
+                ))}
+                {isAddingSubTeam ? (
+                  <input
+                    autoFocus
+                    value={newSubTeamName}
+                    onChange={e => setNewSubTeamName(e.target.value)}
+                    onBlur={addSubTeam}
+                    onKeyDown={e => { if (e.key === 'Enter') addSubTeam(); if (e.key === 'Escape') { setIsAddingSubTeam(false); setNewSubTeamName(''); } }}
+                    placeholder="Sub-team name"
+                    className="px-3 py-1.5 rounded-full text-xs font-bold border border-emerald-400 outline-none w-32"
+                  />
+                ) : (
+                  <button
+                    onClick={() => setIsAddingSubTeam(true)}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-bold border border-dashed border-slate-300 text-slate-400 hover:border-emerald-400 hover:text-emerald-600 transition-all"
+                  >
+                    <Plus size={12} />
+                    Sub-team
+                  </button>
+                )}
+              </div>
+
               <div className="space-y-4">
-                {projects.filter(p => p.team_id === selectedTeam.id).map(project => {
+                {projects.filter(p => p.team_id === selectedTeam.id && (!selectedSubTeam || p.sub_team_id === selectedSubTeam.id)).map(project => {
                   const projectTasks = tasks.filter(t => t.project_ids?.includes(project.id));
                   const completedTasksCount = projectTasks.filter(t => t.status === 'completed').length;
                   const percentComplete = projectTasks.length > 0 ? Math.round((completedTasksCount / projectTasks.length) * 100) : 0;
@@ -3885,14 +4041,14 @@ export default function App() {
                   );
                 })}
 
-                {projects.filter(p => p.team_id === selectedTeam.id).length === 0 && (
+                {projects.filter(p => p.team_id === selectedTeam.id && (!selectedSubTeam || p.sub_team_id === selectedSubTeam.id)).length === 0 && (
                   <div className="py-20 text-center bg-slate-50/50 rounded-3xl border-2 border-dashed border-slate-200 animate-in fade-in">
                     <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-xs">
                       <FolderKanban size={32} className="text-slate-300" />
                     </div>
-                    <h3 className="text-lg font-bold text-slate-800 mb-1">No projects in this team</h3>
+                    <h3 className="text-lg font-bold text-slate-800 mb-1">No projects{selectedSubTeam ? ` in ${selectedSubTeam.name}` : ' in this team'}</h3>
                     <p className="text-slate-500 text-sm max-w-xs mx-auto mb-6">Create a project to start tracking your tasks.</p>
-                    <button 
+                    <button
                       onClick={() => setIsAddingProject(true)}
                       className="inline-flex items-center gap-2 px-5 py-2.5 bg-white border border-slate-200 hover:border-emerald-500 hover:text-emerald-600 text-slate-600 rounded-xl font-bold transition-all text-xs"
                     >
@@ -4290,6 +4446,9 @@ export default function App() {
                                   } else if (s.scope_type === 'team') {
                                     scopeLabel = `Team: ${teams.find(t => t.id === s.scope_id)?.name || s.scope_id}`;
                                     colorClasses = 'bg-blue-50 text-blue-700 border-blue-200';
+                                  } else if (s.scope_type === 'sub_team') {
+                                    scopeLabel = `Sub-team: ${subTeams.find(st => st.id === s.scope_id)?.name || s.scope_id}`;
+                                    colorClasses = 'bg-cyan-50 text-cyan-700 border-cyan-200';
                                   } else if (s.scope_type === 'project') {
                                     scopeLabel = `Proj: ${projects.find(p => p.id === s.scope_id)?.name || s.scope_id}`;
                                     colorClasses = 'bg-amber-50 text-amber-700 border-amber-200';
@@ -4309,6 +4468,7 @@ export default function App() {
                                     let associatedDivisionId: number | null = null;
                                     if (s.scope_type === 'division') associatedDivisionId = s.scope_id;
                                     else if (s.scope_type === 'team') associatedDivisionId = getDivisionOfTeam(s.scope_id);
+                                    else if (s.scope_type === 'sub_team') associatedDivisionId = getDivisionOfSubTeam(s.scope_id);
                                     else if (s.scope_type === 'project') associatedDivisionId = getDivisionOfProject(s.scope_id);
                                     // scope_type === 'organization' leaves associatedDivisionId null -> not deletable by an Admin.
 
@@ -4347,13 +4507,14 @@ export default function App() {
                                       className="bg-white border border-slate-200 text-[11px] rounded-xl px-2.5 py-1.5 font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
                                       value={selectedType}
                                       onChange={(e) => {
-                                        const val = e.target.value as 'organization' | 'division' | 'team' | 'project';
+                                        const val = e.target.value as 'organization' | 'division' | 'team' | 'sub_team' | 'project';
                                         setUserScopeType(prev => ({ ...prev, [user.id]: val }));
                                       }}
                                     >
                                       <option value="organization">Organization</option>
                                       <option value="division">Division</option>
                                       <option value="team">Team</option>
+                                      <option value="sub_team">Sub-team</option>
                                       <option value="project">Project</option>
                                     </select>
 
@@ -4384,6 +4545,13 @@ export default function App() {
                                         return currentUser.user_type.includes('Super Admin') || canManageDivision(t.division_id);
                                       }).map(t => (
                                         <option key={t.id} value={t.id}>{t.name} ({organizations.find(o => o.id === t.organization_id)?.name})</option>
+                                      ))}
+
+                                      {selectedType === 'sub_team' && subTeams.filter(st => {
+                                        const associatedDivision = getDivisionOfSubTeam(st.id);
+                                        return currentUser.user_type.includes('Super Admin') || (associatedDivision && canManageDivision(associatedDivision));
+                                      }).map(st => (
+                                        <option key={st.id} value={st.id}>{st.name} ({teams.find(t => t.id === st.team_id)?.name})</option>
                                       ))}
 
                                       {selectedType === 'project' && projects.filter(p => {
@@ -5145,6 +5313,7 @@ export default function App() {
                         <option value="organization">Organization</option>
                         <option value="division">Division</option>
                         <option value="team">Team</option>
+                        <option value="sub_team">Sub-team</option>
                         <option value="project">Project</option>
                       </select>
                       <select
@@ -5167,6 +5336,17 @@ export default function App() {
                           return currentUser?.user_type.includes('Super Admin') || canManageOrganization(t.organization_id);
                         }).map(t => (
                           <option key={t.id} value={t.id}>{t.name} ({organizations.find(o => o.id === t.organization_id)?.name})</option>
+                        ))}
+                        {/* TEMPLATE FEATURE (2026-07-10): this whole modal only
+                            ever opens for Super Admins (the "Add User" button
+                            is Super-Admin-gated, and Admins can't create users
+                            at all per the 2026-07-09 rework), so no
+                            division-scope filtering actually applies here in
+                            practice -- kept consistent with the team/project
+                            options above rather than introducing a different
+                            pattern. */}
+                        {newUserScopeType === 'sub_team' && subTeams.map(st => (
+                          <option key={st.id} value={st.id}>{st.name} ({teams.find(t => t.id === st.team_id)?.name})</option>
                         ))}
                         {newUserScopeType === 'project' && projects.filter(p => {
                           const associatedOrg = getOrganizationOfProject(p.id);
@@ -5194,6 +5374,87 @@ export default function App() {
                     className="flex-grow py-4 bg-emerald-600 text-white rounded-[20px] font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all"
                   >
                     Create User
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Add Project Modal.
+          TEMPLATE FEATURE (2026-07-10): this modal did not exist before --
+          the "New Project" buttons set isAddingProject to true but nothing
+          rendered on it, so project creation had no working UI at all. Built
+          here (not just a sub-team add-on) because Greg's planned human
+          walkthrough needs a working "create a project" flow regardless, and
+          it's also where the new optional sub-team picker naturally lives. */}
+      <AnimatePresence>
+        {isAddingProject && selectedTeam && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-8"
+            onClick={(e) => e.target === e.currentTarget && setIsAddingProject(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white rounded-[40px] w-full max-w-lg p-10 shadow-2xl relative overflow-hidden"
+            >
+              <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-50 rounded-full -mr-16 -mt-16 opacity-50" />
+              <div className="relative z-10 space-y-8">
+                <div>
+                  <h2 className="text-3xl font-black tracking-tight text-slate-900">New Project</h2>
+                  <p className="text-slate-500 font-medium">In {selectedTeam.name}</p>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Project Name</label>
+                    <input
+                      type="text"
+                      autoFocus
+                      value={newProjectName}
+                      onChange={(e) => setNewProjectName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') addProject(); }}
+                      placeholder="e.g. Q3 Launch Plan"
+                      className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                    />
+                  </div>
+
+                  {subTeams.filter(st => st.team_id === selectedTeam.id).length > 0 && (
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Sub-team (optional)</label>
+                      <select
+                        value={newProjectSubTeamId ?? ''}
+                        onChange={(e) => setNewProjectSubTeamId(e.target.value ? Number(e.target.value) : null)}
+                        className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                      >
+                        <option value="">None -- directly under {selectedTeam.name}</option>
+                        {subTeams.filter(st => st.team_id === selectedTeam.id).map(st => (
+                          <option key={st.id} value={st.id}>{st.name}</option>
+                        ))}
+                      </select>
+                      <p className="text-[10px] text-slate-400 ml-1">Optional. Leave as None if this team doesn't need sub-team structure.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button
+                    onClick={() => { setIsAddingProject(false); setNewProjectName(''); setNewProjectSubTeamId(null); }}
+                    className="flex-grow py-4 border border-slate-200 text-slate-600 rounded-[20px] font-bold hover:bg-slate-50 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={addProject}
+                    className="flex-grow py-4 bg-emerald-600 text-white rounded-[20px] font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all"
+                  >
+                    Create Project
                   </button>
                 </div>
               </div>

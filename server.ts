@@ -75,6 +75,20 @@ async function initDB() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- TEMPLATE FEATURE (2026-07-10): Sub-team tier, added between Team and
+    -- Project per the settled XVerse operating-architecture doc. Optional by
+    -- design -- Greg's decision: every team CAN have sub-teams, none are
+    -- required to. A team with no sub-teams works exactly as it does today
+    -- (projects attach directly to the team); a team that needs finer
+    -- structure (e.g. Revenue -> Business Development / Customer Success)
+    -- can add sub-teams without changing how any other team works.
+    CREATE TABLE IF NOT EXISTS sub_teams (
+      id SERIAL PRIMARY KEY,
+      team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -199,6 +213,14 @@ async function initDB() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS session_expires_at TIMESTAMP;
     CREATE UNIQUE INDEX IF NOT EXISTS users_session_token_idx ON users(session_token) WHERE session_token IS NOT NULL;
   `);
+
+  // TEMPLATE FEATURE (2026-07-10): Sub-team tier, idempotent migration same
+  // pattern as above. Both nullable -- a project/task with no sub_team_id
+  // sits directly under its team, same as before this feature existed.
+  await pool.query(`
+    ALTER TABLE projects ADD COLUMN IF NOT EXISTS sub_team_id INTEGER REFERENCES sub_teams(id) ON DELETE SET NULL;
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS sub_team_id INTEGER REFERENCES sub_teams(id) ON DELETE SET NULL;
+  `);
 }
 
 // SECURITY FIX (emergency, 2026-07-08): GET /users (and every other endpoint
@@ -261,6 +283,17 @@ async function resolveDivisionIdForScope(scopeType: string, scopeId: number): Pr
   if (scopeType === "division") return scopeId;
   if (scopeType === "team") {
     const { rows } = await pool.query("SELECT division_id FROM teams WHERE id = $1", [scopeId]);
+    return rows[0]?.division_id ?? null;
+  }
+  // TEMPLATE FEATURE (2026-07-10): sub_team rolls up through its parent team
+  // to a division, same as team/project below -- a division-scoped Admin
+  // manages sub-teams within their division exactly like they manage teams
+  // and projects there.
+  if (scopeType === "sub_team") {
+    const { rows } = await pool.query(
+      "SELECT t.division_id AS division_id FROM sub_teams st JOIN teams t ON st.team_id = t.id WHERE st.id = $1",
+      [scopeId]
+    );
     return rows[0]?.division_id ?? null;
   }
   if (scopeType === "project") {
@@ -575,6 +608,55 @@ async function startServer() {
     res.status(204).send();
   });
 
+  // --- SUB-TEAMS ---
+  // TEMPLATE FEATURE (2026-07-10): optional tier under Team. Every team can
+  // have sub-teams; none are required to. Authorization mirrors
+  // divisions/teams elsewhere in this file: Super Admin anywhere,
+  // division-scoped Admin only within divisions they manage (resolved via
+  // the sub-team's parent team). Plain create/rename/delete has no special
+  // gate beyond normal auth today, same as teams/projects above -- write
+  // access to structure isn't scope-gated in this codebase yet, only user/
+  // scope management is (see POST /users and /user_scopes).
+  apiRouter.get("/sub_teams", async (req, res) => {
+    const { team_id } = req.query;
+    if (team_id) {
+      const { rows } = await pool.query("SELECT * FROM sub_teams WHERE team_id = $1 ORDER BY name ASC", [team_id]);
+      return res.json(rows);
+    }
+    const { rows } = await pool.query("SELECT * FROM sub_teams ORDER BY name ASC");
+    res.json(rows);
+  });
+
+  apiRouter.post("/sub_teams", async (req, res) => {
+    const { team_id, name } = req.body;
+    if (!team_id || !name) return res.status(400).json({ error: "team_id and name are required" });
+    const { rows } = await pool.query(
+      "INSERT INTO sub_teams (team_id, name) VALUES ($1,$2) RETURNING *",
+      [team_id, name]
+    );
+    res.status(201).json(rows[0]);
+  });
+
+  apiRouter.patch("/sub_teams/:id", async (req, res) => {
+    const { name, team_id } = req.body;
+    const updates: string[] = [];
+    const values: any[] = [];
+    if (name !== undefined) { updates.push(`name = $${values.push(name)}`); }
+    if (team_id !== undefined) { updates.push(`team_id = $${values.push(team_id)}`); }
+    if (!updates.length) return res.status(400).json({ error: "No fields to update" });
+    values.push(req.params.id);
+    const { rows } = await pool.query(`UPDATE sub_teams SET ${updates.join(", ")} WHERE id = $${values.length} RETURNING *`, values);
+    res.json(rows[0]);
+  });
+
+  apiRouter.delete("/sub_teams/:id", async (req, res) => {
+    // Projects/tasks under this sub-team fall back to sitting directly under
+    // the team (sub_team_id -> NULL via ON DELETE SET NULL on both FKs) --
+    // nothing under a deleted sub-team is itself deleted.
+    await pool.query("DELETE FROM sub_teams WHERE id = $1", [req.params.id]);
+    res.status(204).send();
+  });
+
   // --- USERS ---
   apiRouter.get("/users", async (req, res) => {
     const { rows } = await pool.query("SELECT * FROM users ORDER BY first_name ASC");
@@ -868,7 +950,11 @@ async function startServer() {
 
   // --- PROJECTS ---
   apiRouter.get("/projects", async (req, res) => {
-    const { team_id } = req.query;
+    const { team_id, sub_team_id } = req.query;
+    if (sub_team_id) {
+      const { rows } = await pool.query("SELECT * FROM projects WHERE sub_team_id = $1 ORDER BY name ASC", [sub_team_id]);
+      return res.json(rows);
+    }
     if (team_id) {
       const { rows } = await pool.query("SELECT * FROM projects WHERE team_id = $1 ORDER BY name ASC", [team_id]);
       return res.json(rows);
@@ -878,22 +964,29 @@ async function startServer() {
   });
 
   apiRouter.post("/projects", async (req, res) => {
-    const { team_id, name, description } = req.body;
+    // sub_team_id is optional -- a project can sit directly under a team
+    // (sub_team_id NULL, same behavior as before this feature existed) or
+    // under one of that team's sub-teams. Not validated that sub_team_id
+    // actually belongs to team_id; the frontend only offers sub-teams
+    // belonging to the selected team, same trust level as the rest of this
+    // API's structure endpoints.
+    const { team_id, name, description, sub_team_id } = req.body;
     if (!team_id || !name) return res.status(400).json({ error: "team_id and name are required" });
     const { rows } = await pool.query(
-      "INSERT INTO projects (team_id, name, description) VALUES ($1,$2,$3) RETURNING *",
-      [team_id, name, description || ""]
+      "INSERT INTO projects (team_id, name, description, sub_team_id) VALUES ($1,$2,$3,$4) RETURNING *",
+      [team_id, name, description || "", sub_team_id || null]
     );
     res.status(201).json(rows[0]);
   });
 
   apiRouter.patch("/projects/:id", async (req, res) => {
-    const { name, description, team_id } = req.body;
+    const { name, description, team_id, sub_team_id } = req.body;
     const updates: string[] = [];
     const values: any[] = [];
     if (name !== undefined) { updates.push(`name = $${values.push(name)}`); }
     if (description !== undefined) { updates.push(`description = $${values.push(description)}`); }
     if (team_id !== undefined) { updates.push(`team_id = $${values.push(team_id)}`); }
+    if (sub_team_id !== undefined) { updates.push(`sub_team_id = $${values.push(sub_team_id)}`); }
     if (!updates.length) return res.status(400).json({ error: "No fields to update" });
     values.push(req.params.id);
     const { rows } = await pool.query(`UPDATE projects SET ${updates.join(", ")} WHERE id = $${values.length} RETURNING *`, values);
@@ -973,16 +1066,16 @@ async function startServer() {
   });
 
   apiRouter.post("/tasks", async (req, res) => {
-    const { title, description, priority, due_date, key_result, project_ids, section_id, organization_id, team_id, division_id, org_id, assignee_id } = req.body;
+    const { title, description, priority, due_date, key_result, project_ids, section_id, organization_id, team_id, division_id, org_id, assignee_id, sub_team_id } = req.body;
     if (!title) return res.status(400).json({ error: "Title is required" });
 
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       const { rows: [task] } = await client.query(
-        `INSERT INTO tasks (title, description, priority, due_date, key_result, organization_id, team_id, division_id, assignee_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-        [title, description || "", priority || "moderate", due_date || null, key_result || "", organization_id || org_id || null, team_id || null, division_id || null, assignee_id || null]
+        `INSERT INTO tasks (title, description, priority, due_date, key_result, organization_id, team_id, division_id, assignee_id, sub_team_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+        [title, description || "", priority || "moderate", due_date || null, key_result || "", organization_id || org_id || null, team_id || null, division_id || null, assignee_id || null, sub_team_id || null]
       );
       if (project_ids && Array.isArray(project_ids)) {
         for (const pid of project_ids) {
@@ -1031,6 +1124,9 @@ async function startServer() {
 
       const divId = body.division_id ?? body.divisionId;
       if (divId !== undefined) addField("division_id", divId);
+
+      const subTeamId = body.sub_team_id ?? body.subTeamId;
+      if (subTeamId !== undefined) addField("sub_team_id", subTeamId);
 
       if (updates.length > 0) {
         updates.push(`updated_at = $${values.push(new Date().toISOString())}`);
