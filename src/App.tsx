@@ -339,6 +339,37 @@ export default function App() {
     return false;
   };
 
+  // SECURITY FIX (2026-07-09, revised): each Roots deployment is a single
+  // isolated instance per company, so there's only ever one Organization
+  // row -- "Admin scoped to an Organization" collapses into "Super Admin."
+  // Greg's decision: Admin authority is scoped to a Division instead. An
+  // Admin has full control within their division, including granting or
+  // revoking OTHER users' access to that division, but (unlike
+  // canManageOrganization above, now legacy/unused for the Admin tier)
+  // cannot create new user accounts at all -- only Super Admin can.
+  const getDivisionOfTeam = (teamId: number | null | undefined): number | null => {
+    if (!teamId) return null;
+    return teams.find(t => t.id === teamId)?.division_id || null;
+  };
+
+  const getDivisionOfProject = (projId: number | null | undefined): number | null => {
+    if (!projId) return null;
+    const project = projects.find(p => p.id === projId);
+    if (!project) return null;
+    return getDivisionOfTeam(project.team_id);
+  };
+
+  const canManageDivision = (divisionId: number | null | undefined): boolean => {
+    if (!currentUser) return false;
+    const ut = currentUser.user_type;
+    if (ut.includes('Super Admin')) return true;
+    if (ut.includes('Admin')) {
+      if (!divisionId) return false;
+      return allUserScopes.some(s => s.user_id === currentUser.id && s.scope_type === 'division' && Number(s.scope_id) === Number(divisionId));
+    }
+    return false;
+  };
+
   const canEditTask = (task: Task): boolean => {
     if (!currentUser) return false;
     const ut = currentUser.user_type;
@@ -504,15 +535,10 @@ export default function App() {
   // Organization Actions
   const addUser = async () => {
     if (!newUserFirstName || !newUserEmail || !newUserType) return;
-    // SECURITY FIX (2026-07-09): org-scoped Admins must grant at least one
-    // scope when creating a user (server enforces this too -- this is just
-    // a friendlier client-side check so Admins don't hit a 403 with no
-    // context). Super Admins may leave scope blank.
-    const isSuperAdminCreator = !!currentUser?.user_type.includes('Super Admin');
-    if (!isSuperAdminCreator && !newUserScopeId) {
-      alert('Please choose an access scope for this user (Super Admins can skip this).');
-      return;
-    }
+    // SECURITY FIX (2026-07-09, revised): user creation is Super-Admin-only
+    // now (matches the "Add User" button, which is hidden from everyone
+    // else), so scope is always optional here -- no client-side scope
+    // requirement needed anymore.
     try {
       const res = await fetch('/api/users', {
         method: 'POST',
@@ -4127,12 +4153,12 @@ export default function App() {
                   <h2 className="text-4xl font-black tracking-tight text-slate-900 leading-tight">User Management</h2>
                   <p className="text-slate-500 font-medium mt-1">Manage human operators and Digital Intelligences (DI)</p>
                 </div>
-                {/* SECURITY FIX (2026-07-09): only Super Admins and
-                    org-scoped Admins can create users -- matches the
-                    server-side enforcement added to POST /users. Plain
-                    Users no longer see this button (it would just 403 if
-                    they clicked it). */}
-                {(currentUser?.user_type.includes('Super Admin') || currentUser?.user_type.includes('Admin')) && (
+                {/* SECURITY FIX (2026-07-09, revised): user creation is
+                    Super-Admin-only, full stop -- Admins (division-scoped)
+                    cannot create accounts at all, matching the server-side
+                    enforcement in POST /users. Earlier draft let Admins
+                    create users too; superseded by Greg's decision. */}
+                {currentUser?.user_type.includes('Super Admin') && (
                   <button
                     onClick={() => setIsAddingUser(true)}
                     className="flex items-center gap-2 px-8 py-4 bg-emerald-600 text-white rounded-[24px] font-bold shadow-xl shadow-emerald-200 hover:bg-emerald-700 transition-all hover:scale-105 active:scale-95"
@@ -4271,16 +4297,22 @@ export default function App() {
 
                                   // Can the current user delete this scope?
                                   let canDeleteThisScope = false;
+                                  // SECURITY FIX (2026-07-09, revised): Admin
+                                  // authority is division-scoped now, not
+                                  // organization-scoped (see canManageDivision).
+                                  // Admins can never manage/delete an
+                                  // 'organization'-type scope -- that stays
+                                  // Super-Admin-exclusive, same as the server.
                                   if (currentUser?.user_type.includes('Super Admin')) {
                                     canDeleteThisScope = true;
                                   } else if (currentUser?.user_type.includes('Admin')) {
-                                    let associatedOrgId: number | null = null;
-                                    if (s.scope_type === 'organization') associatedOrgId = s.scope_id;
-                                    else if (s.scope_type === 'division') associatedOrgId = getOrganizationOfDivision(s.scope_id);
-                                    else if (s.scope_type === 'team') associatedOrgId = getOrganizationOfTeam(s.scope_id);
-                                    else if (s.scope_type === 'project') associatedOrgId = getOrganizationOfProject(s.scope_id);
+                                    let associatedDivisionId: number | null = null;
+                                    if (s.scope_type === 'division') associatedDivisionId = s.scope_id;
+                                    else if (s.scope_type === 'team') associatedDivisionId = getDivisionOfTeam(s.scope_id);
+                                    else if (s.scope_type === 'project') associatedDivisionId = getDivisionOfProject(s.scope_id);
+                                    // scope_type === 'organization' leaves associatedDivisionId null -> not deletable by an Admin.
 
-                                    if (associatedOrgId && canManageOrganization(associatedOrgId)) {
+                                    if (associatedDivisionId && canManageDivision(associatedDivisionId)) {
                                       canDeleteThisScope = true;
                                     }
                                   }
@@ -4331,27 +4363,32 @@ export default function App() {
                                       id={`new-scope-id-${user.id}`}
                                     >
                                       <option value="">-- Choose {selectedType.charAt(0).toUpperCase() + selectedType.slice(1)} --</option>
-                                      {selectedType === 'organization' && organizations.filter(o => {
-                                        return currentUser.user_type.includes('Super Admin') || canManageOrganization(o.id);
+                                      {/* SECURITY FIX (2026-07-09, revised): Admin
+                                          authority is division-scoped, not
+                                          organization-scoped. Organization-level
+                                          scope is Super-Admin-exclusive -- Admins
+                                          never see any options here for it. */}
+                                      {selectedType === 'organization' && organizations.filter(() => {
+                                        return currentUser.user_type.includes('Super Admin');
                                       }).map(o => (
                                         <option key={o.id} value={o.id}>{o.name}</option>
                                       ))}
-                                      
+
                                       {selectedType === 'division' && divisions.filter(d => {
-                                        return currentUser.user_type.includes('Super Admin') || canManageOrganization(d.organization_id);
+                                        return currentUser.user_type.includes('Super Admin') || canManageDivision(d.id);
                                       }).map(d => (
                                         <option key={d.id} value={d.id}>{d.name} ({organizations.find(o => o.id === d.organization_id)?.name})</option>
                                       ))}
-                                      
+
                                       {selectedType === 'team' && teams.filter(t => {
-                                        return currentUser.user_type.includes('Super Admin') || canManageOrganization(t.organization_id);
+                                        return currentUser.user_type.includes('Super Admin') || canManageDivision(t.division_id);
                                       }).map(t => (
                                         <option key={t.id} value={t.id}>{t.name} ({organizations.find(o => o.id === t.organization_id)?.name})</option>
                                       ))}
-                                      
+
                                       {selectedType === 'project' && projects.filter(p => {
-                                        const associatedOrg = getOrganizationOfProject(p.id);
-                                        return currentUser.user_type.includes('Super Admin') || (associatedOrg && canManageOrganization(associatedOrg));
+                                        const associatedDivision = getDivisionOfProject(p.id);
+                                        return currentUser.user_type.includes('Super Admin') || (associatedDivision && canManageDivision(associatedDivision));
                                       }).map(p => (
                                         <option key={p.id} value={p.id}>{p.name} ({teams.find(t => t.id === p.team_id)?.name})</option>
                                       ))}
