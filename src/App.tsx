@@ -35,7 +35,10 @@ import {
   GitBranch,
   Key,
   Copy,
-  Shield
+  Shield,
+  Sparkles,
+  Send,
+  Loader2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -145,7 +148,11 @@ interface User {
   google_id?: string;
   avatar_url?: string;
   is_di: boolean;
-  user_type: 'Human Super Admin' | 'DI Super Admin' | 'Human Admin' | 'DI Admin' | 'Human User' | 'DI User';
+  // BUGFIX (2026-07-10, Greg's explicit rule): Super Admin must always be a
+  // Human account -- "DI Super Admin" removed from the valid set. There can
+  // be more than one Human Super Admin, but a DI account can never hold this
+  // tier. Enforced server-side too (see violatesDiSuperAdminRule in server.ts).
+  user_type: 'Human Super Admin' | 'Human Admin' | 'DI Admin' | 'Human User' | 'DI User';
   api_key?: string;
 }
 
@@ -168,6 +175,202 @@ const SECTION_COLORS = [
   { name: 'violet', bg: 'bg-violet-100', text: 'text-violet-700', border: 'border-violet-200' },
   { name: 'pink', bg: 'bg-pink-100', text: 'text-pink-700', border: 'border-pink-200' },
 ];
+
+// --- In-app AI agent (2026-07-16) ---------------------------------------
+// A collapsible right-side chat panel that talks to POST /api/agent/chat.
+// The agent runs server-side and acts entirely as the logged-in user (their
+// session token is forwarded on every action), so it can only do what the user
+// could do by hand. This component just renders the conversation and posts the
+// transcript; all the tool-calling happens on the server.
+
+interface AgentChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  actions?: { tool: string; ok: boolean }[];
+  error?: boolean;
+}
+
+function AgentPanel({
+  open,
+  onClose,
+  currentUser,
+  agentName,
+  onActed,
+}: {
+  open: boolean;
+  onClose: () => void;
+  currentUser: User | null;
+  agentName: string;
+  onActed: () => void;
+}) {
+  const [messages, setMessages] = useState<AgentChatMessage[]>([]);
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+  }, [messages, busy]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || busy) return;
+    const nextMessages: AgentChatMessage[] = [...messages, { role: 'user', content: text }];
+    setMessages(nextMessages);
+    setInput('');
+    setBusy(true);
+    try {
+      const res = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content:
+              data?.error ||
+              (res.status === 501
+                ? 'The AI assistant isn’t configured on this server yet.'
+                : 'Something went wrong reaching the assistant.'),
+            error: true,
+          },
+        ]);
+      } else {
+        const actions = Array.isArray(data.actions)
+          ? data.actions.map((a: any) => ({ tool: a.tool, ok: a.ok }))
+          : [];
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: data.reply || '(no response)', actions },
+        ]);
+        // If the agent successfully changed anything, refresh the app's data
+        // so the boards/lists reflect it immediately.
+        if (actions.some((a: any) => a.ok && a.tool !== 'list_structure' && a.tool !== 'list_tasks' && a.tool !== 'get_task')) {
+          onActed();
+        }
+      }
+    } catch (e: any) {
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Network error reaching the assistant.', error: true },
+      ]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const firstName = currentUser?.first_name || 'there';
+
+  return (
+    <aside
+      className={`fixed top-0 right-0 h-screen w-[380px] bg-white border-l border-slate-200 shadow-2xl z-40 flex flex-col transition-transform duration-300 ${
+        open ? 'translate-x-0' : 'translate-x-full'
+      }`}
+      aria-hidden={!open}
+    >
+      <div className="h-20 px-5 flex items-center justify-between border-b border-slate-200 shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-2xl bg-emerald-600 flex items-center justify-center shadow-lg shadow-emerald-200">
+            <Sparkles size={18} className="text-white" />
+          </div>
+          <div className="flex flex-col">
+            <span className="text-sm font-black tracking-tight text-slate-900">{agentName}</span>
+            <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Task assistant</span>
+          </div>
+        </div>
+        <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors" title="Close">
+          <X size={18} />
+        </button>
+      </div>
+
+      <div ref={scrollRef} className="flex-grow overflow-y-auto p-4 space-y-4">
+        {messages.length === 0 && (
+          <div className="text-center text-slate-400 mt-10 px-6">
+            <div className="w-14 h-14 rounded-3xl bg-emerald-50 flex items-center justify-center mx-auto mb-4">
+              <Sparkles size={24} className="text-emerald-500" />
+            </div>
+            <p className="text-sm font-bold text-slate-600">Hi {firstName} 👋</p>
+            <p className="text-xs mt-2 leading-relaxed">
+              I can create, edit, move, and complete tasks for you — within your access. Try “Add a task to review the Q3 budget in the Finance project, high priority.”
+            </p>
+          </div>
+        )}
+
+        {messages.map((m, i) => (
+          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div
+              className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                m.role === 'user'
+                  ? 'bg-emerald-600 text-white'
+                  : m.error
+                  ? 'bg-red-50 text-red-700 border border-red-100'
+                  : 'bg-slate-100 text-slate-800'
+              }`}
+            >
+              {m.content}
+              {m.actions && m.actions.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-slate-200/70 flex flex-wrap gap-1.5">
+                  {m.actions.map((a, j) => (
+                    <span
+                      key={j}
+                      className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        a.ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                      }`}
+                    >
+                      {a.ok ? <Check size={10} /> : <AlertTriangle size={10} />}
+                      {a.tool}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+
+        {busy && (
+          <div className="flex justify-start">
+            <div className="bg-slate-100 text-slate-500 rounded-2xl px-3.5 py-2.5 text-sm flex items-center gap-2">
+              <Loader2 size={14} className="animate-spin" /> Working…
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="p-3 border-t border-slate-200 shrink-0">
+        <div className="flex items-end gap-2 bg-slate-100 rounded-2xl px-3 py-2">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            placeholder="Ask about or manage your tasks…"
+            rows={1}
+            className="flex-grow bg-transparent resize-none text-sm focus:outline-none max-h-32 py-1"
+          />
+          <button
+            onClick={send}
+            disabled={busy || !input.trim()}
+            className="p-2 bg-emerald-600 text-white rounded-xl disabled:opacity-40 disabled:cursor-not-allowed hover:bg-emerald-700 transition-colors shrink-0"
+            title="Send"
+          >
+            <Send size={16} />
+          </button>
+        </div>
+        <p className="text-[10px] text-slate-400 text-center mt-2">Acts with your permissions. Always confirm important changes.</p>
+      </div>
+    </aside>
+  );
+}
 
 export default function App() {
   const [organizations, setOrganizations] = useState<Organization[]>([]);
@@ -201,12 +404,21 @@ export default function App() {
   const [newTaskAssigneeId, setNewTaskAssigneeId] = useState<number | null>(null);
   const [newTaskProjectIds, setNewTaskProjectIds] = useState<number[]>([]);
   const [newTaskSectionId, setNewTaskSectionId] = useState<number | null>(null);
+  // BUGFIX (2026-07-10): the "All Tasks" quick-add form only exposed a
+  // Project picker -- there was no way to attach a task directly to a
+  // Division or Team (e.g. for an orphaned task not tied to any project),
+  // even though the schema fully supports it. Team/Division previously
+  // came only from ambient sidebar-selection state, which is often unset
+  // or stale on the All Tasks screen. These give the form explicit control.
+  const [newTaskDivisionId, setNewTaskDivisionId] = useState<number | null>(null);
+  const [newTaskTeamId, setNewTaskTeamId] = useState<number | null>(null);
   
   const [newOrgName, setNewOrgName] = useState('');
   const [isAddingOrg, setIsAddingOrg] = useState(false);
 
   const [newTeamName, setNewTeamName] = useState('');
   const [isAddingTeam, setIsAddingTeam] = useState(false);
+  const [newTeamDivisionId, setNewTeamDivisionId] = useState<number | null>(null);
 
   // TEMPLATE FEATURE (2026-07-10): sub-team form state, same pattern as team.
   const [newSubTeamName, setNewSubTeamName] = useState('');
@@ -252,6 +464,12 @@ export default function App() {
   const [editingSubtaskTitle, setEditingSubtaskTitle] = useState('');
 
   const [currentView, setCurrentView] = useState<'project' | 'all-tasks' | 'about' | 'users'>('project');
+
+  // In-app AI agent panel (2026-07-16). AGENT_DISPLAY_NAME is baked at build
+  // time from VITE_AGENT_NAME if provided; the server has its own AGENT_NAME
+  // env var for the system prompt — keep them in sync if you rename it.
+  const [agentOpen, setAgentOpen] = useState(false);
+  const AGENT_DISPLAY_NAME = (import.meta as any).env?.VITE_AGENT_NAME || 'Ivy';
   
   // User Creation States
   const [isAddingUser, setIsAddingUser] = useState(false);
@@ -281,6 +499,18 @@ export default function App() {
 
   const [expandedTaskId, setExpandedTaskId] = useState<number | null>(null);
   const [viewingTaskId, setViewingTaskId] = useState<number | null>(null);
+  // BUGFIX (2026-07-10): every field in the Task Detail modal already
+  // auto-saves on change (each PATCHes /api/tasks/:id individually) -- there
+  // was never meant to be a "Save" button. But with zero visual feedback on
+  // success, Greg (reasonably) couldn't tell a save had happened at all
+  // ("I dont see any way to save changes"). This flashes a brief confirmation.
+  const [taskSaveFlash, setTaskSaveFlash] = useState(false);
+  const taskSaveFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flashTaskSaved = () => {
+    setTaskSaveFlash(true);
+    if (taskSaveFlashTimer.current) clearTimeout(taskSaveFlashTimer.current);
+    taskSaveFlashTimer.current = setTimeout(() => setTaskSaveFlash(false), 1600);
+  };
   const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
   const [newAttachmentName, setNewAttachmentName] = useState('');
   const [newAttachmentUrl, setNewAttachmentUrl] = useState('');
@@ -573,6 +803,15 @@ export default function App() {
     if (isAddingProject) setNewProjectSubTeamId(selectedSubTeam?.id ?? null);
   }, [isAddingProject]);
 
+  // BUGFIX (2026-07-10): the "Create Team"/"New Team" buttons set
+  // isAddingTeam to true but no modal ever read that state, so team
+  // creation had no working UI at all (same class of bug as the earlier
+  // missing Add Project modal). Pre-fill the modal's division picker from
+  // whatever division was selected when the button was clicked.
+  useEffect(() => {
+    if (isAddingTeam) setNewTeamDivisionId(selectedDivision?.id ?? null);
+  }, [isAddingTeam]);
+
   useEffect(() => {
     if (!currentUser) {
       fetch('/api/auth/bootstrap-status')
@@ -760,13 +999,14 @@ export default function App() {
       await fetch('/api/teams', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          name: newTeamName, 
+        body: JSON.stringify({
+          name: newTeamName,
           organization_id: orgId,
-          division_id: selectedDivision?.id || null
+          division_id: newTeamDivisionId || null
         }),
       });
       setNewTeamName('');
+      setNewTeamDivisionId(null);
       setIsAddingTeam(false);
       fetchData();
     } catch (e) { console.error(e); }
@@ -918,17 +1158,25 @@ export default function App() {
   const addTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTaskTitle.trim()) return;
-    
-    const orgId = selectedOrganization?.id || null;
+
+    const project_ids = newTaskProjectIds.length > 0 ? newTaskProjectIds : (selectedProject ? [selectedProject.id] : []);
+
+    // BUGFIX (2026-07-10): resolve Team/Division/Org from the most specific
+    // source available instead of only ever reading ambient sidebar-selection
+    // state. Priority: explicit form pickers > the chosen Project's own
+    // team/division > whatever's selected in the sidebar. Also, since each
+    // deployment has exactly one Organization (see MANUAL.md), auto-resolve
+    // it instead of requiring the user to have navigated into it first --
+    // that requirement was blocking task creation from a fresh "All Tasks"
+    // screen with nothing selected in the sidebar.
+    const teamId = newTaskTeamId || selectedTeam?.id || (project_ids.length > 0 ? (projects.find(p => p.id === project_ids[0])?.team_id ?? null) : null) || null;
+    const divId = newTaskDivisionId || getDivisionOfTeam(teamId) || selectedDivision?.id || null;
+    const orgId = selectedOrganization?.id || getOrganizationOfTeam(teamId) || getOrganizationOfDivision(divId) || organizations[0]?.id || null;
     if (!orgId) {
-      alert("Please select an Organization first to add a task.");
+      alert("Please create an Organization first to add a task.");
       return;
     }
-    
-    const divId = selectedDivision?.id || (selectedTeam?.division_id) || null;
-    const teamId = selectedTeam?.id || null;
-    const project_ids = newTaskProjectIds.length > 0 ? newTaskProjectIds : (selectedProject ? [selectedProject.id] : []);
-    
+
     if (!canCreateTask(orgId, divId, teamId, project_ids)) {
       alert("Missing Permissions – Super Admin, Organization Admin, or designated User Scope required to create a task in this area.");
       return;
@@ -966,6 +1214,9 @@ export default function App() {
       setNewTaskKeyResult('');
       setNewTaskAssigneeId(null);
       setNewTaskSectionId(null);
+      setNewTaskProjectIds([]);
+      setNewTaskDivisionId(null);
+      setNewTaskTeamId(null);
       fetchData();
     } catch (e) { console.error(e); }
   };
@@ -1020,9 +1271,10 @@ export default function App() {
         return;
       }
 
+      flashTaskSaved();
       setEditingTaskId(null);
-    } catch (e) { 
-      console.error(e); 
+    } catch (e) {
+      console.error(e);
       fetchData(); // Rollback
     }
   };
@@ -1036,13 +1288,14 @@ export default function App() {
       await fetch(`/api/tasks/${taskId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           organization_id: orgId,
           division_id: null,
           team_id: null,
           project_ids: []
         }),
       });
+      flashTaskSaved();
       fetchData();
     } catch (e) {
       console.error(e);
@@ -1059,13 +1312,14 @@ export default function App() {
       await fetch(`/api/tasks/${taskId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           division_id: divisionId,
           organization_id: divSelected ? divSelected.organization_id : null,
           team_id: null,
           project_ids: []
         }),
       });
+      flashTaskSaved();
       fetchData();
     } catch (e) {
       console.error(e);
@@ -1083,6 +1337,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ assignee_id: userId }),
       });
+      flashTaskSaved();
       fetchData();
     } catch (e) { console.error(e); }
   };
@@ -1123,9 +1378,10 @@ export default function App() {
               team_id: teamId,
               organization_id: team?.organization_id || null,
               division_id: team?.division_id || null,
-              project_ids: newProjectIds 
+              project_ids: newProjectIds
             }),
           });
+          flashTaskSaved();
           fetchData();
         }
       }
@@ -2563,18 +2819,26 @@ export default function App() {
             <span className="text-sm font-bold">About</span>
           </button>
 
-          <button 
-            onClick={() => {
-              setCurrentView('users');
-              setSelectedOrganization(null);
-              setSelectedTeam(null);
-              setSelectedProject(null);
-            }}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all ${currentView === 'users' ? 'bg-emerald-600 text-white shadow-md shadow-emerald-100' : 'text-slate-600 hover:bg-slate-50'}`}
-          >
-            <Users size={18} />
-            <span className="text-sm font-bold">Users</span>
-          </button>
+          {/* BUGFIX (2026-07-10, Greg's request): "Users" (User Management --
+              create accounts, rotate DI keys, grant/revoke scopes) was shown
+              to every logged-in user regardless of role, even plain Users who
+              have no use for it and can't act on anything there. Hidden for
+              non-Admins; Super Admin / Admin still see it, since it's their
+              only UI path to manage accounts and scopes. */}
+          {currentUser?.user_type.includes('Admin') && (
+            <button
+              onClick={() => {
+                setCurrentView('users');
+                setSelectedOrganization(null);
+                setSelectedTeam(null);
+                setSelectedProject(null);
+              }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl transition-all ${currentView === 'users' ? 'bg-emerald-600 text-white shadow-md shadow-emerald-100' : 'text-slate-600 hover:bg-slate-50'}`}
+            >
+              <Users size={18} />
+              <span className="text-sm font-bold">Users</span>
+            </button>
+          )}
         </div>
 
         <nav className="flex-grow overflow-y-auto px-2 pb-6 custom-scrollbar">
@@ -3050,6 +3314,18 @@ export default function App() {
               {showCompleted ? <CheckCircle2 size={14} /> : <Circle size={14} />}
               {showCompleted ? 'Showing Completed' : 'Hiding Completed'}
             </button>
+            <button
+              onClick={() => setAgentOpen((v) => !v)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-2xl text-xs font-bold transition-all border ${
+                agentOpen
+                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-md shadow-emerald-100'
+                  : 'bg-emerald-50 text-emerald-700 border-emerald-100 hover:bg-emerald-100'
+              }`}
+              title="Ask the AI assistant"
+            >
+              <Sparkles size={14} />
+              Ask AI
+            </button>
             <div className="flex items-center gap-3 bg-slate-50 border border-slate-200/80 rounded-2xl p-1.5 pr-4 shadow-sm shrink-0">
               <img 
                 src={currentUser?.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${currentUser?.first_name}`} 
@@ -3264,6 +3540,42 @@ export default function App() {
                       />
                     </div>
 
+                    {/* BUGFIX (2026-07-10): explicit Division/Team pickers -- previously
+                        this form only offered a Project picker, with Team/Division
+                        silently derived from whatever was selected in the sidebar
+                        (often nothing, on a fresh All Tasks screen). These let a task
+                        be attached to a Division or Team directly, project or not. */}
+                    <div className="flex items-center gap-2">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Division</label>
+                      <select
+                        value={newTaskDivisionId || ''}
+                        onChange={(e) => setNewTaskDivisionId(e.target.value ? Number(e.target.value) : null)}
+                        className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500 max-w-[150px]"
+                      >
+                        <option value="">No Division</option>
+                        {divisions.map(d => (
+                          <option key={d.id} value={d.id}>{d.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Team</label>
+                      <select
+                        value={newTaskTeamId || ''}
+                        onChange={(e) => setNewTaskTeamId(e.target.value ? Number(e.target.value) : null)}
+                        className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500 max-w-[150px]"
+                      >
+                        <option value="">No Team (Orphaned)</option>
+                        {teams.map(t => {
+                          const d = divisions.find(div => div.id === t.division_id);
+                          return (
+                            <option key={t.id} value={t.id}>{t.name}{d ? ` (${d.name})` : ''}</option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
                     <div className="flex items-center gap-2">
                       <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Project</label>
                       <select
@@ -3291,21 +3603,7 @@ export default function App() {
                       </select>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Assignee</label>
-                      <select
-                        value={newTaskAssigneeId || ''}
-                        onChange={(e) => setNewTaskAssigneeId(e.target.value ? Number(e.target.value) : null)}
-                        className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-emerald-500"
-                      >
-                        <option value="">Unassigned</option>
-                        {users.map(u => (
-                          <option key={u.id} value={u.id}>{u.first_name} {u.last_name || ''}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <button 
+                    <button
                       type="submit"
                       disabled={!newTaskTitle.trim()}
                       className="ml-auto bg-emerald-600 text-white px-6 py-2 rounded-xl text-xs font-bold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md shadow-emerald-200"
@@ -4586,30 +4884,38 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="mt-6 pt-4 border-t border-slate-50 flex items-center justify-end gap-2">
-                      <button 
-                        onClick={() => {
-                          setEditingUser(user);
-                          setEditingUserFirstName(user.first_name);
-                          setEditingUserLastName(user.last_name || '');
-                          setEditingUserEmail(user.email);
-                          setEditingUserPhone(user.phone || '');
-                          setEditingUserIsDI(!!user.is_di);
-                          setEditingUserType(user.user_type);
-                        }}
-                        className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-all"
-                        title="Edit User"
-                      >
-                        <Edit2 size={16} />
-                      </button>
-                      <button 
-                        onClick={() => deleteUser(user.id)}
-                        className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all"
-                        title="Delete User"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
+                    {/* BUGFIX (2026-07-10): PATCH/DELETE /users/:id are now
+                        Super-Admin-only server-side (they had NO check at
+                        all before -- any Admin, or a direct API call, could
+                        edit any account's role or delete any user). Hiding
+                        these for non-Super-Admins so the UI doesn't offer
+                        actions that will now 403. */}
+                    {currentUser?.user_type.includes('Super Admin') && (
+                      <div className="mt-6 pt-4 border-t border-slate-50 flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => {
+                            setEditingUser(user);
+                            setEditingUserFirstName(user.first_name);
+                            setEditingUserLastName(user.last_name || '');
+                            setEditingUserEmail(user.email);
+                            setEditingUserPhone(user.phone || '');
+                            setEditingUserIsDI(!!user.is_di);
+                            setEditingUserType(user.user_type);
+                          }}
+                          className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-all"
+                          title="Edit User"
+                        >
+                          <Edit2 size={16} />
+                        </button>
+                        <button
+                          onClick={() => deleteUser(user.id)}
+                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all"
+                          title="Delete User"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -4700,7 +5006,24 @@ export default function App() {
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        <button 
+                        {/* BUGFIX (2026-07-10): visual confirmation that a field
+                            just auto-saved -- every field in this modal saves
+                            immediately on change via its own PATCH call, there
+                            is no separate Save button by design, but with zero
+                            feedback that wasn't obvious. */}
+                        <AnimatePresence>
+                          {taskSaveFlash && (
+                            <motion.span
+                              initial={{ opacity: 0, y: -4 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0 }}
+                              className="flex items-center gap-1.5 text-[10px] font-black text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-full uppercase tracking-wider"
+                            >
+                              <CheckCircle2 size={12} /> Saved
+                            </motion.span>
+                          )}
+                        </AnimatePresence>
+                        <button
                           onClick={() => {
                             if (confirm('Delete this task?')) {
                               deleteTask(task.id);
@@ -4711,7 +5034,7 @@ export default function App() {
                         >
                           <Trash2 size={24} />
                         </button>
-                        <button 
+                        <button
                           onClick={() => setViewingTaskId(null)}
                           className="p-3 hover:bg-white rounded-2xl transition-colors text-slate-400 hover:text-emerald-600 shadow-sm"
                         >
@@ -5281,9 +5604,9 @@ export default function App() {
                         </>
                       ) : (
                         <>
-                          {currentUser?.user_type.includes('Super Admin') && (
-                            <option value="DI Super Admin">DI Super Admin</option>
-                          )}
+                          {/* BUGFIX (2026-07-10, Greg's explicit rule): no
+                              "DI Super Admin" option -- Super Admin must
+                              always be Human, no exceptions. */}
                           <option value="DI Admin">DI Admin</option>
                           <option value="DI User">DI User</option>
                         </>
@@ -5463,6 +5786,87 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Create Team Modal.
+          BUGFIX (2026-07-10): this modal did not exist before -- the
+          "Create Team" / "New Team" buttons set isAddingTeam to true but
+          nothing rendered on it, so team creation had no working UI at all
+          (found while Greg was doing the human UI walkthrough: created an
+          Organization and a Division, then hit a dead end with no way to
+          create a Team). Mirrors the Add Project modal above. */}
+      <AnimatePresence>
+        {isAddingTeam && selectedOrganization && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-8"
+            onClick={(e) => e.target === e.currentTarget && setIsAddingTeam(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white rounded-[40px] w-full max-w-lg p-10 shadow-2xl relative overflow-hidden"
+            >
+              <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-50 rounded-full -mr-16 -mt-16 opacity-50" />
+              <div className="relative z-10 space-y-8">
+                <div>
+                  <h2 className="text-3xl font-black tracking-tight text-slate-900">New Team</h2>
+                  <p className="text-slate-500 font-medium">In {selectedOrganization.name}</p>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Team Name</label>
+                    <input
+                      type="text"
+                      autoFocus
+                      value={newTeamName}
+                      onChange={(e) => setNewTeamName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') addTeam(); }}
+                      placeholder="e.g. Revenue"
+                      className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                    />
+                  </div>
+
+                  {divisions.filter(d => d.organization_id === selectedOrganization.id).length > 0 && (
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Division (optional)</label>
+                      <select
+                        value={newTeamDivisionId ?? ''}
+                        onChange={(e) => setNewTeamDivisionId(e.target.value ? Number(e.target.value) : null)}
+                        className="w-full bg-slate-50 border-none rounded-2xl px-5 py-4 text-sm font-medium focus:ring-2 focus:ring-emerald-500/20"
+                      >
+                        <option value="">None -- directly under {selectedOrganization.name}</option>
+                        {divisions.filter(d => d.organization_id === selectedOrganization.id).map(div => (
+                          <option key={div.id} value={div.id}>{div.name}</option>
+                        ))}
+                      </select>
+                      <p className="text-[10px] text-slate-400 ml-1">Optional. Leave as None if this team doesn't sit inside a division.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button
+                    onClick={() => { setIsAddingTeam(false); setNewTeamName(''); setNewTeamDivisionId(null); }}
+                    className="flex-grow py-4 border border-slate-200 text-slate-600 rounded-[20px] font-bold hover:bg-slate-50 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={addTeam}
+                    className="flex-grow py-4 bg-emerald-600 text-white rounded-[20px] font-bold shadow-lg shadow-emerald-200 hover:bg-emerald-700 transition-all"
+                  >
+                    Create Team
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Edit User Modal */}
       <AnimatePresence>
         {editingUser && (
@@ -5570,7 +5974,9 @@ export default function App() {
                         </>
                       ) : (
                         <>
-                          <option value="DI Super Admin">DI Super Admin</option>
+                          {/* BUGFIX (2026-07-10, Greg's explicit rule): no
+                              "DI Super Admin" option -- Super Admin must
+                              always be Human, no exceptions. */}
                           <option value="DI Admin">DI Admin</option>
                           <option value="DI User">DI User</option>
                         </>
@@ -5598,6 +6004,22 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* In-app AI agent panel (2026-07-16) + click-away backdrop */}
+      {agentOpen && (
+        <div
+          className="fixed inset-0 bg-slate-900/10 z-30"
+          onClick={() => setAgentOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+      <AgentPanel
+        open={agentOpen}
+        onClose={() => setAgentOpen(false)}
+        currentUser={currentUser}
+        agentName={AGENT_DISPLAY_NAME}
+        onActed={fetchData}
+      />
     </div>
   );
 }

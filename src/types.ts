@@ -55,7 +55,11 @@ export interface User {
   google_id?: string;
   avatar_url?: string;
   is_di: boolean;
-  user_type: 'Human Super Admin' | 'DI Super Admin' | 'Human Admin' | 'DI Admin' | 'Human User' | 'DI User';
+  // BUGFIX (2026-07-10, Greg's explicit rule): Super Admin must always be a
+  // Human account -- "DI Super Admin" removed. (Note: this file isn't
+  // currently imported anywhere in src/ -- App.tsx defines its own User
+  // interface inline -- but fixed for consistency in case that changes.)
+  user_type: 'Human Super Admin' | 'Human Admin' | 'DI Admin' | 'Human User' | 'DI User';
   api_key?: string;
 }
 

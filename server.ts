@@ -6,8 +6,24 @@ import crypto from "crypto";
 import pg from "pg";
 import bcrypt from "bcryptjs";
 import { OAuth2Client } from "google-auth-library";
+import {
+  runAgentLoop,
+  makeClaudeCaller,
+  makeLocalApiCaller,
+  sanitizeIncomingMessages,
+  DEFAULT_AGENT_NAME,
+  DEFAULT_MODEL,
+} from "./agent";
 
 const { Pool } = pg;
+
+// In-app AI agent (2026-07-16). The Anthropic API key is server-only and never
+// sent to the browser. Model + assistant display name are configurable via env.
+// If ANTHROPIC_API_KEY is unset, POST /api/agent/chat returns 501 and the rest
+// of the app is unaffected.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
+const AGENT_NAME = process.env.AGENT_NAME || DEFAULT_AGENT_NAME;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -321,6 +337,87 @@ async function canManageDivisionServer(requester: any, divisionId: number | null
   return rows.length > 0;
 }
 
+// SECURITY FIX (2026-07-10): server-side authorization for the rest of the
+// structural CRUD surface (organizations, divisions, teams, sub_teams,
+// projects, tasks). Found by testing the DI agent "Audrey" against her own
+// API key with zero granted scopes: she could create/delete an Organization
+// outright and create a task inside a team she had no scope on -- proving
+// the client-side checks in App.tsx (canCreateTask, canManageOrganization,
+// canManageDivision) were the ONLY gate, and a direct API call skips them
+// entirely. Only user creation and user_scopes management got real
+// server-side authorization in the 2026-07-09 fix; this extends the same
+// treatment to everything else. Mirrors the client-side logic so both layers
+// agree, but this is the layer that actually matters for security.
+//
+// Resolves the most specific division a set of structural identifiers rolls
+// up to, trying each in order of specificity, so one call can authorize a
+// request regardless of which fields it happens to carry.
+async function resolveDivisionForAuth(opts: {
+  divisionId?: number | null;
+  teamId?: number | null;
+  subTeamId?: number | null;
+  projectId?: number | null;
+}): Promise<number | null> {
+  if (opts.divisionId) return opts.divisionId;
+  if (opts.teamId) return resolveDivisionIdForScope("team", opts.teamId);
+  if (opts.subTeamId) return resolveDivisionIdForScope("sub_team", opts.subTeamId);
+  if (opts.projectId) return resolveDivisionIdForScope("project", opts.projectId);
+  return null;
+}
+
+// True if the requester may create/edit/delete something identified by any
+// combination of these structural fields. Super Admin: always. Admin: only
+// within a division they hold an explicit 'division' scope for (resolved
+// from whichever of divisionId/teamId/subTeamId/projectId is present).
+// Plain User: only if they hold an explicit user_scopes row (any type --
+// organization/division/team/sub_team/project all count) matching one of
+// the actual identifiers given, same breadth as canCreateTask client-side.
+async function canManageStructureServer(
+  requester: any,
+  opts: {
+    organizationId?: number | null;
+    divisionId?: number | null;
+    teamId?: number | null;
+    subTeamId?: number | null;
+    projectIds?: (number | null | undefined)[];
+  }
+): Promise<boolean> {
+  if (isSuperAdminUser(requester)) return true;
+
+  const projectId = opts.projectIds?.find((p) => p != null) ?? null;
+  const divisionId = await resolveDivisionForAuth({
+    divisionId: opts.divisionId,
+    teamId: opts.teamId,
+    subTeamId: opts.subTeamId,
+    projectId,
+  });
+
+  if (isAdminUser(requester)) {
+    return canManageDivisionServer(requester, divisionId);
+  }
+
+  const { rows } = await pool.query("SELECT scope_type, scope_id FROM user_scopes WHERE user_id = $1", [requester.id]);
+  const has = (type: string, id: number | null | undefined) =>
+    id != null && rows.some((r: any) => r.scope_type === type && Number(r.scope_id) === Number(id));
+
+  if (has("organization", opts.organizationId)) return true;
+  if (has("division", divisionId)) return true;
+  if (has("team", opts.teamId)) return true;
+  if (has("sub_team", opts.subTeamId)) return true;
+  if (opts.projectIds?.some((pid) => has("project", pid))) return true;
+  return false;
+}
+
+// SECURITY FIX (2026-07-10, Greg's explicit rule): Super Admin must always be
+// a Human account. There can be multiple Human Super Admins, but a DI
+// (Digital Intelligence) account can never hold the Super Admin tier. Found
+// the client actually offered "DI Super Admin" as a selectable option in
+// both the Create User and Edit User forms -- this closes it off server-side
+// too, which is the layer that actually matters.
+function violatesDiSuperAdminRule(is_di: any, user_type: any): boolean {
+  return !!is_di && typeof user_type === "string" && user_type.includes("Super Admin");
+}
+
 // SECURITY FIX (2026-07-09): real session support for human users. Human
 // logins previously got nothing back to authenticate with on subsequent
 // requests — only DI agents had an api_key. Sessions are opaque, high-
@@ -505,6 +602,14 @@ async function startServer() {
   });
 
   apiRouter.post("/organizations", async (req, res) => {
+    // SECURITY FIX (2026-07-10): Organization-level access is documented as
+    // Super-Admin-exclusive (each deployment has exactly one Organization),
+    // but this route had no check at all -- any authenticated caller could
+    // create/edit/delete Organizations. Found via Audrey's API test.
+    const requester = (req as any).user;
+    if (!isSuperAdminUser(requester)) {
+      return res.status(403).json({ error: "Only Super Admins can create Organizations" });
+    }
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: "Name is required" });
     const { rows } = await pool.query("INSERT INTO organizations (name) VALUES ($1) RETURNING *", [name]);
@@ -512,6 +617,10 @@ async function startServer() {
   });
 
   apiRouter.patch("/organizations/:id", async (req, res) => {
+    const requester = (req as any).user;
+    if (!isSuperAdminUser(requester)) {
+      return res.status(403).json({ error: "Only Super Admins can edit Organizations" });
+    }
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: "Name is required" });
     const { rows } = await pool.query("UPDATE organizations SET name = $1 WHERE id = $2 RETURNING *", [name, req.params.id]);
@@ -519,6 +628,10 @@ async function startServer() {
   });
 
   apiRouter.delete("/organizations/:id", async (req, res) => {
+    const requester = (req as any).user;
+    if (!isSuperAdminUser(requester)) {
+      return res.status(403).json({ error: "Only Super Admins can delete Organizations" });
+    }
     await pool.query("DELETE FROM organizations WHERE id = $1", [req.params.id]);
     res.status(204).send();
   });
@@ -535,8 +648,17 @@ async function startServer() {
   });
 
   apiRouter.post("/divisions", async (req, res) => {
+    // SECURITY FIX (2026-07-10): a new Division has no existing scope of its
+    // own to check yet, so authority is checked against its parent
+    // Organization -- Super Admin always, or a caller (Admin or User) who
+    // holds an explicit 'organization' scope grant on it (rare in practice,
+    // since only Super Admin can grant org-level scope, but the door exists).
+    const requester = (req as any).user;
     const { name, organization_id } = req.body;
     if (!name || !organization_id) return res.status(400).json({ error: "name and organization_id are required" });
+    if (!(await canManageStructureServer(requester, { organizationId: organization_id }))) {
+      return res.status(403).json({ error: "Not authorized to create a Division in this Organization" });
+    }
     const { rows } = await pool.query(
       "INSERT INTO divisions (name, organization_id) VALUES ($1, $2) RETURNING *",
       [name, organization_id]
@@ -545,6 +667,13 @@ async function startServer() {
   });
 
   apiRouter.patch("/divisions/:id", async (req, res) => {
+    // SECURITY FIX (2026-07-10): authorize against the division's CURRENT
+    // id (not any proposed organization_id in the body) -- Super Admin
+    // anywhere, or an Admin/User who manages this specific division.
+    const requester = (req as any).user;
+    if (!(await canManageStructureServer(requester, { divisionId: Number(req.params.id) }))) {
+      return res.status(403).json({ error: "Not authorized to edit this Division" });
+    }
     const { name, organization_id } = req.body;
     const updates: string[] = [];
     const values: any[] = [];
@@ -557,6 +686,10 @@ async function startServer() {
   });
 
   apiRouter.delete("/divisions/:id", async (req, res) => {
+    const requester = (req as any).user;
+    if (!(await canManageStructureServer(requester, { divisionId: Number(req.params.id) }))) {
+      return res.status(403).json({ error: "Not authorized to delete this Division" });
+    }
     await pool.query("DELETE FROM divisions WHERE id = $1", [req.params.id]);
     res.status(204).send();
   });
@@ -577,11 +710,21 @@ async function startServer() {
   });
 
   apiRouter.post("/teams", async (req, res) => {
+    // SECURITY FIX (2026-07-10): a new Team has no scope of its own yet.
+    // With a division_id, authority is checked against that division (Super
+    // Admin, or an Admin/User managing it). Without one (an org-level/
+    // independent team), it rolls all the way up to the Organization --
+    // which in practice means Super Admin only, since Admin authority is
+    // division-scoped and can never reach org level.
+    const requester = (req as any).user;
     let { name, organization_id, division_id } = req.body;
     if (!name) return res.status(400).json({ error: "Name is required" });
     if (!organization_id) {
       const { rows } = await pool.query("SELECT id FROM organizations LIMIT 1");
       if (rows[0]) organization_id = rows[0].id;
+    }
+    if (!(await canManageStructureServer(requester, { organizationId: organization_id, divisionId: division_id || null }))) {
+      return res.status(403).json({ error: "Not authorized to create a Team here" });
     }
     const { rows } = await pool.query(
       "INSERT INTO teams (name, organization_id, division_id) VALUES ($1, $2, $3) RETURNING *",
@@ -591,6 +734,14 @@ async function startServer() {
   });
 
   apiRouter.patch("/teams/:id", async (req, res) => {
+    // SECURITY FIX (2026-07-10): authorize against the team's CURRENT
+    // organization/division (not any proposed new parent in the body).
+    const requester = (req as any).user;
+    const { rows: [existingTeam] } = await pool.query("SELECT * FROM teams WHERE id = $1", [req.params.id]);
+    if (!existingTeam) return res.status(404).json({ error: "Team not found" });
+    if (!(await canManageStructureServer(requester, { organizationId: existingTeam.organization_id, divisionId: existingTeam.division_id, teamId: existingTeam.id }))) {
+      return res.status(403).json({ error: "Not authorized to edit this Team" });
+    }
     const { name, organization_id, division_id } = req.body;
     const updates: string[] = [];
     const values: any[] = [];
@@ -604,6 +755,12 @@ async function startServer() {
   });
 
   apiRouter.delete("/teams/:id", async (req, res) => {
+    const requester = (req as any).user;
+    const { rows: [existingTeam] } = await pool.query("SELECT * FROM teams WHERE id = $1", [req.params.id]);
+    if (!existingTeam) return res.status(404).json({ error: "Team not found" });
+    if (!(await canManageStructureServer(requester, { organizationId: existingTeam.organization_id, divisionId: existingTeam.division_id, teamId: existingTeam.id }))) {
+      return res.status(403).json({ error: "Not authorized to delete this Team" });
+    }
     await pool.query("DELETE FROM teams WHERE id = $1", [req.params.id]);
     res.status(204).send();
   });
@@ -612,11 +769,11 @@ async function startServer() {
   // TEMPLATE FEATURE (2026-07-10): optional tier under Team. Every team can
   // have sub-teams; none are required to. Authorization mirrors
   // divisions/teams elsewhere in this file: Super Admin anywhere,
-  // division-scoped Admin only within divisions they manage (resolved via
-  // the sub-team's parent team). Plain create/rename/delete has no special
-  // gate beyond normal auth today, same as teams/projects above -- write
-  // access to structure isn't scope-gated in this codebase yet, only user/
-  // scope management is (see POST /users and /user_scopes).
+  // division-scoped Admin/User only within divisions they manage (resolved
+  // via the sub-team's parent team). SECURITY FIX (2026-07-10): this used to
+  // have no gate at all beyond normal auth ("write access to structure isn't
+  // scope-gated" -- see prior version of this comment); now enforced via
+  // canManageStructureServer like the rest of the structural CRUD surface.
   apiRouter.get("/sub_teams", async (req, res) => {
     const { team_id } = req.query;
     if (team_id) {
@@ -628,8 +785,12 @@ async function startServer() {
   });
 
   apiRouter.post("/sub_teams", async (req, res) => {
+    const requester = (req as any).user;
     const { team_id, name } = req.body;
     if (!team_id || !name) return res.status(400).json({ error: "team_id and name are required" });
+    if (!(await canManageStructureServer(requester, { teamId: team_id }))) {
+      return res.status(403).json({ error: "Not authorized to create a Sub-team here" });
+    }
     const { rows } = await pool.query(
       "INSERT INTO sub_teams (team_id, name) VALUES ($1,$2) RETURNING *",
       [team_id, name]
@@ -638,6 +799,12 @@ async function startServer() {
   });
 
   apiRouter.patch("/sub_teams/:id", async (req, res) => {
+    const requester = (req as any).user;
+    const { rows: [existing] } = await pool.query("SELECT * FROM sub_teams WHERE id = $1", [req.params.id]);
+    if (!existing) return res.status(404).json({ error: "Sub-team not found" });
+    if (!(await canManageStructureServer(requester, { teamId: existing.team_id, subTeamId: existing.id }))) {
+      return res.status(403).json({ error: "Not authorized to edit this Sub-team" });
+    }
     const { name, team_id } = req.body;
     const updates: string[] = [];
     const values: any[] = [];
@@ -653,6 +820,12 @@ async function startServer() {
     // Projects/tasks under this sub-team fall back to sitting directly under
     // the team (sub_team_id -> NULL via ON DELETE SET NULL on both FKs) --
     // nothing under a deleted sub-team is itself deleted.
+    const requester = (req as any).user;
+    const { rows: [existing] } = await pool.query("SELECT * FROM sub_teams WHERE id = $1", [req.params.id]);
+    if (!existing) return res.status(404).json({ error: "Sub-team not found" });
+    if (!(await canManageStructureServer(requester, { teamId: existing.team_id, subTeamId: existing.id }))) {
+      return res.status(403).json({ error: "Not authorized to delete this Sub-team" });
+    }
     await pool.query("DELETE FROM sub_teams WHERE id = $1", [req.params.id]);
     res.status(204).send();
   });
@@ -677,6 +850,11 @@ async function startServer() {
     }
     const { first_name, last_name, email, phone, is_di, user_type, password, scopes } = req.body;
     if (!first_name || !email || !user_type) return res.status(400).json({ error: "first_name, email, and user_type are required" });
+    // SECURITY FIX (2026-07-10, Greg's explicit rule): Super Admin must
+    // always be a Human account -- a DI account can never hold that tier.
+    if (violatesDiSuperAdminRule(is_di, user_type)) {
+      return res.status(400).json({ error: "Super Admin must be a Human account -- a Digital Intelligence account cannot hold the Super Admin tier." });
+    }
     // Scopes are optional here (Super Admin can grant any scope to anyone,
     // no authorization check needed) -- just assigned in the same request
     // as a convenience so a new user isn't left with zero access.
@@ -734,11 +912,36 @@ async function startServer() {
   });
 
   apiRouter.patch("/users/:id", async (req, res) => {
+    // SECURITY FIX (2026-07-10): this route had NO authorization check at
+    // all -- any authenticated caller (including a DI agent's API key, or a
+    // plain "User" tier account) could PATCH any other user's record,
+    // including promoting themselves to Super Admin or regenerating any DI
+    // agent's live API key. Restricted to Super-Admin-only, matching the
+    // same rule already enforced on POST /users -- editing an existing
+    // account is at least as sensitive as creating one, and Admin's actual
+    // documented power over other users is limited to granting/revoking
+    // scopes (see POST/DELETE /user_scopes), not editing their account.
+    const requester = (req as any).user;
+    if (!isSuperAdminUser(requester)) {
+      return res.status(403).json({ error: "Only Super Admins can edit user accounts" });
+    }
+
     const { id } = req.params;
     const { rows: [user] } = await pool.query("SELECT * FROM users WHERE id = $1", [id]);
     if (!user) return res.status(404).json({ error: "User not found" });
 
     const { first_name, last_name, email, phone, is_di, user_type, password, regenerate_api_key } = req.body;
+
+    // SECURITY FIX (2026-07-10, Greg's explicit rule): Super Admin must
+    // always be Human -- reject any update that would leave this account
+    // both DI and Super Admin, whether that comes from flipping is_di,
+    // flipping user_type, or both in the same request.
+    const finalIsDiForRule = is_di !== undefined ? is_di : user.is_di;
+    const finalUserTypeForRule = user_type !== undefined ? user_type : user.user_type;
+    if (violatesDiSuperAdminRule(finalIsDiForRule, finalUserTypeForRule)) {
+      return res.status(400).json({ error: "Super Admin must be a Human account -- a Digital Intelligence account cannot hold the Super Admin tier." });
+    }
+
     const updates: string[] = [];
     const values: any[] = [];
 
@@ -788,6 +991,26 @@ async function startServer() {
   });
 
   apiRouter.delete("/users/:id", async (req, res) => {
+    // SECURITY FIX (2026-07-10): same gap as PATCH /users/:id above -- this
+    // route had NO authorization check, so any authenticated caller could
+    // delete any account, including the real Super Admin. Super-Admin-only,
+    // plus a guard against deleting the last remaining Super Admin (a Human
+    // account, per the rule above) -- that would lock the instance out of
+    // its own admin tier with no way back in through the UI.
+    const requester = (req as any).user;
+    if (!isSuperAdminUser(requester)) {
+      return res.status(403).json({ error: "Only Super Admins can delete user accounts" });
+    }
+    const { rows: [target] } = await pool.query("SELECT * FROM users WHERE id = $1", [req.params.id]);
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (isSuperAdminUser(target)) {
+      const { rows: [{ count }] } = await pool.query(
+        "SELECT COUNT(*)::int AS count FROM users WHERE user_type LIKE '%Super Admin%'"
+      );
+      if (Number(count) <= 1) {
+        return res.status(400).json({ error: "Cannot delete the last remaining Super Admin." });
+      }
+    }
     const { rowCount } = await pool.query("DELETE FROM users WHERE id = $1", [req.params.id]);
     if (!rowCount) return res.status(404).json({ error: "User not found" });
     res.status(204).send();
@@ -970,8 +1193,15 @@ async function startServer() {
     // actually belongs to team_id; the frontend only offers sub-teams
     // belonging to the selected team, same trust level as the rest of this
     // API's structure endpoints.
+    // SECURITY FIX (2026-07-10): authorize against the target team (and
+    // sub-team, if given) -- Super Admin, an Admin/User managing that
+    // team's division, or a User with a direct team/sub_team scope grant.
+    const requester = (req as any).user;
     const { team_id, name, description, sub_team_id } = req.body;
     if (!team_id || !name) return res.status(400).json({ error: "team_id and name are required" });
+    if (!(await canManageStructureServer(requester, { teamId: team_id, subTeamId: sub_team_id || null }))) {
+      return res.status(403).json({ error: "Not authorized to create a Project here" });
+    }
     const { rows } = await pool.query(
       "INSERT INTO projects (team_id, name, description, sub_team_id) VALUES ($1,$2,$3,$4) RETURNING *",
       [team_id, name, description || "", sub_team_id || null]
@@ -980,6 +1210,14 @@ async function startServer() {
   });
 
   apiRouter.patch("/projects/:id", async (req, res) => {
+    // SECURITY FIX (2026-07-10): authorize against the project's CURRENT
+    // team/sub-team, not any proposed new parent in the body.
+    const requester = (req as any).user;
+    const { rows: [existing] } = await pool.query("SELECT * FROM projects WHERE id = $1", [req.params.id]);
+    if (!existing) return res.status(404).json({ error: "Project not found" });
+    if (!(await canManageStructureServer(requester, { teamId: existing.team_id, subTeamId: existing.sub_team_id, projectIds: [existing.id] }))) {
+      return res.status(403).json({ error: "Not authorized to edit this Project" });
+    }
     const { name, description, team_id, sub_team_id } = req.body;
     const updates: string[] = [];
     const values: any[] = [];
@@ -994,6 +1232,12 @@ async function startServer() {
   });
 
   apiRouter.delete("/projects/:id", async (req, res) => {
+    const requester = (req as any).user;
+    const { rows: [existing] } = await pool.query("SELECT * FROM projects WHERE id = $1", [req.params.id]);
+    if (!existing) return res.status(404).json({ error: "Project not found" });
+    if (!(await canManageStructureServer(requester, { teamId: existing.team_id, subTeamId: existing.sub_team_id, projectIds: [existing.id] }))) {
+      return res.status(403).json({ error: "Not authorized to delete this Project" });
+    }
     await pool.query("DELETE FROM projects WHERE id = $1", [req.params.id]);
     res.status(204).send();
   });
@@ -1066,8 +1310,23 @@ async function startServer() {
   });
 
   apiRouter.post("/tasks", async (req, res) => {
+    // SECURITY FIX (2026-07-10): mirrors the client-side canCreateTask check
+    // in App.tsx, server-side. Super Admin anywhere; Admin/User with a scope
+    // covering any of organization/division/team/sub_team/project given.
+    // A task created with none of those (fully orphaned, zero scope) is
+    // Super-Admin-only -- nobody else has "authority" over unscoped content.
+    const requester = (req as any).user;
     const { title, description, priority, due_date, key_result, project_ids, section_id, organization_id, team_id, division_id, org_id, assignee_id, sub_team_id } = req.body;
     if (!title) return res.status(400).json({ error: "Title is required" });
+    if (!(await canManageStructureServer(requester, {
+      organizationId: organization_id || org_id || null,
+      divisionId: division_id || null,
+      teamId: team_id || null,
+      subTeamId: sub_team_id || null,
+      projectIds: Array.isArray(project_ids) ? project_ids : [],
+    }))) {
+      return res.status(403).json({ error: "Not authorized to create a task here" });
+    }
 
     const client = await pool.connect();
     try {
@@ -1097,7 +1356,24 @@ async function startServer() {
   });
 
   apiRouter.patch("/tasks/:id", async (req, res) => {
+    // SECURITY FIX (2026-07-10): authorize against the task's CURRENT
+    // organization/division/team/sub_team/projects, not any proposed new
+    // values in the body -- prevents re-parenting as a backdoor around scope.
+    const requester = (req as any).user;
     const { id } = req.params;
+    const { rows: [existingTask] } = await pool.query("SELECT * FROM tasks WHERE id = $1", [id]);
+    if (!existingTask) return res.status(404).json({ error: "Task not found" });
+    const { rows: existingProjectRows } = await pool.query("SELECT project_id FROM task_projects WHERE task_id = $1", [id]);
+    if (!(await canManageStructureServer(requester, {
+      organizationId: existingTask.organization_id,
+      divisionId: existingTask.division_id,
+      teamId: existingTask.team_id,
+      subTeamId: existingTask.sub_team_id,
+      projectIds: existingProjectRows.map((r: any) => r.project_id),
+    }))) {
+      return res.status(403).json({ error: "Not authorized to edit this task" });
+    }
+
     const body = req.body;
 
     const client = await pool.connect();
@@ -1161,6 +1437,20 @@ async function startServer() {
   });
 
   apiRouter.patch("/tasks/:id/section", async (req, res) => {
+    // SECURITY FIX (2026-07-10): same authorization as PATCH /tasks/:id.
+    const requester = (req as any).user;
+    const { rows: [existingTask] } = await pool.query("SELECT * FROM tasks WHERE id = $1", [req.params.id]);
+    if (!existingTask) return res.status(404).json({ error: "Task not found" });
+    const { rows: existingProjectRows } = await pool.query("SELECT project_id FROM task_projects WHERE task_id = $1", [req.params.id]);
+    if (!(await canManageStructureServer(requester, {
+      organizationId: existingTask.organization_id,
+      divisionId: existingTask.division_id,
+      teamId: existingTask.team_id,
+      subTeamId: existingTask.sub_team_id,
+      projectIds: existingProjectRows.map((r: any) => r.project_id),
+    }))) {
+      return res.status(403).json({ error: "Not authorized to edit this task" });
+    }
     const { section_id, current_project_id } = req.body;
     await pool.query("UPDATE task_projects SET section_id = $1 WHERE task_id = $2 AND project_id = $3", [section_id, req.params.id, current_project_id]);
     const { rows: [task] } = await pool.query("SELECT * FROM tasks WHERE id = $1", [req.params.id]);
@@ -1168,6 +1458,19 @@ async function startServer() {
   });
 
   apiRouter.delete("/tasks/:id", async (req, res) => {
+    const requester = (req as any).user;
+    const { rows: [existingTask] } = await pool.query("SELECT * FROM tasks WHERE id = $1", [req.params.id]);
+    if (!existingTask) return res.status(404).json({ error: "Task not found" });
+    const { rows: existingProjectRows } = await pool.query("SELECT project_id FROM task_projects WHERE task_id = $1", [req.params.id]);
+    if (!(await canManageStructureServer(requester, {
+      organizationId: existingTask.organization_id,
+      divisionId: existingTask.division_id,
+      teamId: existingTask.team_id,
+      subTeamId: existingTask.sub_team_id,
+      projectIds: existingProjectRows.map((r: any) => r.project_id),
+    }))) {
+      return res.status(403).json({ error: "Not authorized to delete this task" });
+    }
     const { rowCount } = await pool.query("DELETE FROM tasks WHERE id = $1", [req.params.id]);
     if (!rowCount) return res.status(404).json({ error: "Task not found" });
     res.status(204).send();
@@ -1229,6 +1532,50 @@ async function startServer() {
   apiRouter.delete("/comments/:id", async (req, res) => {
     await pool.query("DELETE FROM comments WHERE id = $1", [req.params.id]);
     res.status(204).send();
+  });
+
+  // --- IN-APP AI AGENT (2026-07-16) ---
+  // Runs a Claude tool-use loop server-side and returns the assistant's reply
+  // plus the list of actions it took. It is auth-gated like every other route,
+  // so req.user is the logged-in caller. Crucially, the agent's tools call this
+  // very API back over loopback using the caller's OWN credential (see
+  // makeLocalApiCaller + agent.ts), so the agent inherits exactly the user's
+  // permissions and cannot bypass any of the server-side authorization above.
+  apiRouter.post("/agent/chat", async (req, res) => {
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(501).json({
+        error: "AI agent is not configured on this server (ANTHROPIC_API_KEY is not set).",
+      });
+    }
+    const requester = (req as any).user;
+    const credential = extractCredential(req);
+    if (!credential) {
+      // Should be unreachable (auth middleware ran), but never call the model
+      // without a credential to forward — that's what keeps the agent scoped.
+      return res.status(401).json({ error: "Authentication required" });
+    }
+
+    const messages = sanitizeIncomingMessages(req.body?.messages);
+    if (!messages) {
+      return res.status(400).json({
+        error: "Body must be { messages: [{ role: 'user'|'assistant', content: string }, ...] } starting with a user turn.",
+      });
+    }
+
+    const baseUrl = `http://127.0.0.1:${PORT}/api`;
+    try {
+      const result = await runAgentLoop({
+        messages,
+        user: requester,
+        agentName: AGENT_NAME,
+        callModel: makeClaudeCaller(ANTHROPIC_API_KEY, ANTHROPIC_MODEL),
+        callApi: makeLocalApiCaller(baseUrl, credential),
+      });
+      res.json(result);
+    } catch (e: any) {
+      console.error("Agent chat failed:", e);
+      res.status(502).json({ error: `Agent failed: ${e?.message || "unknown error"}` });
+    }
   });
 
   apiRouter.all("*", (req, res) => {
