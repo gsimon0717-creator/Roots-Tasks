@@ -42,6 +42,22 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
+// Minimal ambient typing for Google Identity Services — not pulling in a
+// full @types package for one integration point (mirrors the plain-fetch,
+// no-heavy-dep approach used throughout this codebase, e.g. authFetch.ts).
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (config: { client_id: string; callback: (resp: { credential: string }) => void }) => void;
+          renderButton: (el: HTMLElement, options: { theme?: string; size?: string; text?: string; shape?: string }) => void;
+        };
+      };
+    };
+  }
+}
+
 // Types
 interface Organization {
   id: number;
@@ -537,7 +553,71 @@ export default function App() {
 
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
-  const [showSsoModal, setShowSsoModal] = useState(false);
+
+  // Real Google Sign-In (2026-07-23): replaces the "Google SSO Simulator"
+  // modal, which fabricated an arbitrary {email, first_name, last_name,
+  // google_id} payload client-side and posted it directly — the backend's
+  // /api/auth/google-sso already only accepts a real id_token (see
+  // verifyGoogleIdToken in server.ts), so the simulator's payload was
+  // rejected the moment that hardening landed. This loads the real Google
+  // Identity Services button and hands its verified credential to the
+  // server instead. GOOGLE_CLIENT_ID is baked in at build time from
+  // VITE_GOOGLE_CLIENT_ID — use the SAME OAuth Client ID as Arbor so both
+  // apps share one Google identity.
+  const GOOGLE_CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID as string | undefined;
+  const googleButtonRef = useRef<HTMLDivElement>(null);
+
+  const handleGoogleCredential = async (idToken: string) => {
+    try {
+      const res = await fetch('/api/auth/google-sso', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id_token: idToken })
+      });
+      if (res.ok) {
+        const user = await res.json();
+        setCurrentUser(user);
+        localStorage.setItem('roots_logged_in_user', JSON.stringify(user));
+        fetchData();
+      } else {
+        const err = await res.json();
+        alert(err.error || 'Google Sign-In failed');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Google Sign-In failed');
+    }
+  };
+
+  useEffect(() => {
+    if (currentUser || !GOOGLE_CLIENT_ID) return;
+
+    const renderButton = () => {
+      if (!window.google || !googleButtonRef.current) return;
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: (resp) => handleGoogleCredential(resp.credential),
+      });
+      window.google.accounts.id.renderButton(googleButtonRef.current, { theme: 'filled_black', size: 'large', text: 'signin_with', shape: 'pill' });
+    };
+
+    if (window.google) {
+      renderButton();
+      return;
+    }
+
+    const scriptId = 'google-identity-services';
+    let script = document.getElementById(scriptId) as HTMLScriptElement | null;
+    if (!script) {
+      script = document.createElement('script');
+      script.id = scriptId;
+      script.src = 'https://accounts.google.com/gsi/client';
+      script.async = true;
+      document.head.appendChild(script);
+    }
+    script.addEventListener('load', renderButton);
+    return () => script?.removeEventListener('load', renderButton);
+  }, [currentUser, GOOGLE_CLIENT_ID]);
 
   // Initial password setup states for lock-out safety
   const [needsInitialPassword, setNeedsInitialPassword] = useState(false);
@@ -1623,38 +1703,6 @@ export default function App() {
       }
     };
 
-    const handleGoogleSSO = async (emailOverride?: string, firstNameOverride?: string, lastNameOverride?: string) => {
-      const email = emailOverride || authEmail || 'user@example.com';
-      const first = firstNameOverride || email.split('@')[0];
-      const firstName = first.charAt(0).toUpperCase() + first.slice(1);
-      const lastName = lastNameOverride || 'SSO User';
-      
-      try {
-        const res = await fetch('/api/auth/google-sso', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email,
-            first_name: firstName,
-            last_name: lastName,
-            google_id: `google_${Date.now()}`
-          })
-        });
-        if (res.ok) {
-          const user = await res.json();
-          setCurrentUser(user);
-          localStorage.setItem('roots_logged_in_user', JSON.stringify(user));
-          setShowSsoModal(false);
-          fetchData();
-        } else {
-          const err = await res.json();
-          alert(err.error || 'Google SSO failed');
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    };
-
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col justify-center py-12 px-6 lg:px-8 font-sans antialiased">
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-emerald-950/40 via-slate-950 to-slate-950 pointer-events-none" />
@@ -1801,20 +1849,14 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Google SSO Button */}
-                <button 
-                  type="button" 
-                  onClick={() => setShowSsoModal(true)}
-                  className="w-full flex items-center justify-center gap-3 py-3 px-4 bg-slate-800 border border-slate-700 text-slate-300 font-semibold text-sm rounded-2xl hover:bg-slate-700/80 transition-colors cursor-pointer"
-                >
-                  <svg className="w-4 h-4 mr-1" viewBox="0 0 24 24">
-                    <path fill="#EA4335" d="M12 5.04c1.66 0 3.2.57 4.38 1.69l3.27-3.27C17.67 1.48 14.97 1 12 1 7.24 1 3.2 3.74 1.24 7.74l3.85 3c.9-2.7 3.41-4.7 6.91-4.7z"/>
-                    <path fill="#4285F4" d="M23.49 12.27c0-.81-.07-1.59-.2-2.36H12v4.47h6.43c-.28 1.47-1.11 2.71-2.36 3.56l3.66 2.84c2.14-1.97 3.76-4.88 3.76-8.51z"/>
-                    <path fill="#FBBC05" d="M5.09 10.74c-.23-.69-.36-1.42-.36-2.19s.13-1.5.36-2.19L1.24 3.36C.45 4.96 0 6.74 0 8.55s.45 3.59 1.24 5.19l3.85-3z"/>
-                    <path fill="#34A853" d="M12 23c3.24 0 5.97-1.07 7.96-2.91l-3.66-2.84c-1.01.68-2.31 1.09-4.3 1.09-3.5 0-6.01-2-6.91-4.7l-3.85 3C3.2 20.26 7.24 23 12 23z"/>
-                  </svg>
-                  Sign In with Google SSO
-                </button>
+                {/* Real Google Sign-In button, rendered by Google Identity Services */}
+                {GOOGLE_CLIENT_ID ? (
+                  <div className="flex justify-center" ref={googleButtonRef} />
+                ) : (
+                  <p className="text-xs text-slate-500 text-center">
+                    Google Sign-In is not configured for this build (VITE_GOOGLE_CLIENT_ID is unset).
+                  </p>
+                )}
               </form>
             )}
 
@@ -1859,24 +1901,6 @@ export default function App() {
                     Loading fast-track login accounts...
                   </div>
                 )}
-                
-                {/* Fallback mock login for standard test */}
-                <button
-                  type="button"
-                  onClick={() => handleGoogleSSO('audrey@google.com')}
-                  className="w-full flex items-center justify-between p-3 bg-slate-950/60 rounded-2xl hover:bg-slate-950 hover:scale-[1.01] border border-slate-800 transition-all text-left"
-                >
-                  <div className="flex items-center gap-2">
-                    <img src="https://api.dicebear.com/7.x/avataaars/svg?seed=Audrey" alt="Audrey" className="w-7 h-7 rounded-full" referrerPolicy="no-referrer" />
-                    <div>
-                      <p className="text-xs font-semibold text-white">Audrey (Google Employee)</p>
-                      <p className="text-[10px] text-slate-400">audrey@google.com</p>
-                    </div>
-                  </div>
-                  <span className="text-[9px] px-2 py-0.5 rounded-full font-bold border bg-neutral-500/20 text-neutral-300 border-neutral-500/30">
-                    Google SSO
-                  </span>
-                </button>
               </div>
             </div>
           </div>
@@ -2016,101 +2040,6 @@ export default function App() {
                   </button>
                 </div>
               </form>
-            </div>
-          </div>
-        )}
-
-        {showSsoModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-            <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 relative overflow-hidden shadow-2xl text-left">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 bg-slate-800 rounded-lg flex items-center justify-center">
-                    <svg className="w-5 h-5" viewBox="0 0 24 24">
-                      <path fill="#EA4335" d="M12 5.04c1.66 0 3.2.57 4.38 1.69l3.27-3.27C17.67 1.48 14.97 1 12 1 7.24 1 3.2 3.74 1.24 7.74l3.85 3c.9-2.7 3.41-4.7 6.91-4.7z"/>
-                      <path fill="#4285F4" d="M23.49 12.27c0-.81-.07-1.59-.2-2.36H12v4.47h6.43c-.28 1.47-1.11 2.71-2.36 3.56l3.66 2.84c2.14-1.97 3.76-4.88 3.76-8.51z"/>
-                      <path fill="#FBBC05" d="M5.09 10.74c-.23-.69-.36-1.42-.36-2.19s.13-1.5.36-2.19L1.24 3.36C.45 4.96 0 6.74 0 8.55s.45 3.59 1.24 5.19l3.85-3z"/>
-                      <path fill="#34A853" d="M12 23c3.24 0 5.97-1.07 7.96-2.91l-3.66-2.84c-1.01.68-2.31 1.09-4.3 1.09-3.5 0-6.01-2-6.91-4.7l-3.85 3C3.2 20.26 7.24 23 12 23z"/>
-                    </svg>
-                  </div>
-                  <div>
-                    <h3 className="text-base font-bold text-white">Google SSO Simulator</h3>
-                    <p className="text-xs text-slate-400">Secure Sandboxed Sign-In</p>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => setShowSsoModal(false)}
-                  className="text-slate-400 hover:text-white p-1 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              <p className="text-xs text-slate-400 mb-4">
-                Select a workspace identity or input a custom Google account to simulate the SSO callback.
-              </p>
-
-              {/* Account Quick Selectors */}
-              <div className="space-y-2 max-h-48 overflow-y-auto pr-1 mb-4">
-                {[
-                  { email: 'gsimon0717@gmail.com', name: 'Gregory Simon' },
-                  { email: 'audrey@google.com', name: 'Audrey (VC Corporate)' },
-                  { email: 'john@example.com', name: 'John Doe (Super Admin)' },
-                  { email: 'jane@example.com', name: 'Jane Smith (Admin)' },
-                ].map(acc => (
-                  <button
-                    key={acc.email}
-                    onClick={() => handleGoogleSSO(acc.email, acc.name.split(' ')[0], acc.name.split(' ').slice(1).join(' '))}
-                    className="w-full flex items-center justify-between p-2.5 bg-slate-800/50 hover:bg-slate-800 rounded-xl border border-slate-800 hover:border-slate-700 transition-all text-left cursor-pointer group"
-                  >
-                    <div className="flex items-center gap-2">
-                      <div className="w-8 h-8 rounded-full bg-emerald-700 text-white font-bold flex items-center justify-center text-xs">
-                        {acc.name.charAt(0)}
-                      </div>
-                      <div>
-                        <p className="text-xs font-semibold text-white group-hover:text-emerald-400 transition-colors">{acc.name}</p>
-                        <p className="text-[10px] text-slate-500">{acc.email}</p>
-                      </div>
-                    </div>
-                    <span className="text-[10px] uppercase font-black text-emerald-500 tracking-wider">Select</span>
-                  </button>
-                ))}
-              </div>
-
-              <div className="border-t border-slate-800 pt-3">
-                <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Simulate Custom Account</p>
-                <div className="space-y-2">
-                  <input
-                    type="text"
-                    id="sso-custom-name"
-                    placeholder="Full Name (e.g. Alice Johnson)"
-                    className="w-full px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none"
-                  />
-                  <input
-                    type="email"
-                    id="sso-custom-email"
-                    placeholder="Google Email (e.g. alice@example.com)"
-                    className="w-full px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none"
-                  />
-                  <button
-                    onClick={() => {
-                      const nameEl = document.getElementById('sso-custom-name') as HTMLInputElement;
-                      const emailEl = document.getElementById('sso-custom-email') as HTMLInputElement;
-                      if (!emailEl.value) {
-                        alert('Please fill at least the Google Email field');
-                        return;
-                      }
-                      const parts = nameEl.value.trim().split(' ');
-                      const fN = parts[0] || emailEl.value.split('@')[0];
-                      const lN = parts.slice(1).join(' ') || 'User';
-                      handleGoogleSSO(emailEl.value.trim(), fN, lN);
-                    }}
-                    className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs py-2 rounded-xl transition-all uppercase tracking-wider cursor-pointer"
-                  >
-                    Authorize SSO Callback
-                  </button>
-                </div>
-              </div>
             </div>
           </div>
         )}
